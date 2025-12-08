@@ -89,7 +89,10 @@ impl RunCommand {
     pub fn execute(mut self) -> Result<()> {
         if let Some(policy_path) = &self.run.common.policy_file {
             let policy = wasmtime_cli_flags::policy::PolicyOptions::from_file(policy_path)?;
-            self.run.dirs.extend(policy.mounts);
+            let mut temp = vec![];
+            temp.extend(policy.mounts);
+            temp.extend(self.run.dirs);
+            self.run.dirs = temp;
         }
         self.run.common.init_logging()?;
 
