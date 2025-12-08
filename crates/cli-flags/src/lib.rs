@@ -1,4 +1,5 @@
 //! Contains the common Wasmtime command line interface (CLI) flags.
+pub mod policy;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -9,6 +10,8 @@ use std::{
     time::Duration,
 };
 use wasmtime::Config;
+
+use crate::policy::PolicyOptions;
 
 pub mod opt;
 
@@ -577,11 +580,15 @@ pub struct CommonOptions {
     /// This TOML configuration file can provide same configuration options as the
     /// `--optimize`, `--codgen`, `--debug`, `--wasm`, `--wasi` CLI options, with a couple exceptions.
     ///
-    /// Additional options specified on the command line will take precedent over options loaded from
+    /// Additional options specified on the command line or the policy file will take precedent over options loaded from
     /// this TOML file.
     #[arg(long = "config", value_name = "FILE")]
     #[serde(skip)]
     pub config: Option<PathBuf>,
+
+    #[arg(long = "policy-file", value_name = "FILE")]
+    #[serde(skip)]
+    pub policy_file: Option<PathBuf>,
 }
 
 macro_rules! match_feature {
@@ -622,6 +629,7 @@ impl CommonOptions {
             wasi: Default::default(),
             target: None,
             config: None,
+            policy_file: None,
         }
     }
 
@@ -638,6 +646,14 @@ impl CommonOptions {
             self.wasm = toml_options.wasm;
             self.wasi = toml_options.wasi;
         }
+        // if policy file is defined it's prioritized over the config file.
+        if let Some(policy_file_path) = &self.policy_file {
+            let policy_options = PolicyOptions::from_file(policy_file_path)?;
+            self.wasm = policy_options.wasm;
+            self.wasi = policy_options.wasi;
+        }
+
+        // CLI args have the highest priority.
         self.opts.configure_with(&self.opts_raw);
         self.codegen.configure_with(&self.codegen_raw);
         self.debug.configure_with(&self.debug_raw);
@@ -1227,12 +1243,16 @@ impl fmt::Display for CommonOptions {
             configured,
             target,
             config,
+            policy_file,
         } = self;
         if let Some(target) = target {
             write!(f, "--target {target} ")?;
         }
         if let Some(config) = config {
             write!(f, "--config {} ", config.display())?;
+        }
+        if let Some(policy_file) = policy_file{
+            write!(f, "--policy-file {} ", policy_file.display())?;
         }
 
         let codegen_flags;

@@ -8,6 +8,7 @@
 use crate::common::{Profile, RunCommon, RunTarget};
 use anyhow::{Context as _, Error, Result, anyhow, bail};
 use clap::Parser;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -86,6 +87,10 @@ enum CliLinker {
 impl RunCommand {
     /// Executes the command.
     pub fn execute(mut self) -> Result<()> {
+        if let Some(policy_path) = &self.run.common.policy_file {
+            let policy = wasmtime_cli_flags::policy::PolicyOptions::from_file(policy_path)?;
+            self.run.dirs.extend(policy.mounts);
+        }
         self.run.common.init_logging()?;
 
         let mut config = self.run.common.config(None)?;

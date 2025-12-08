@@ -1,0 +1,10 @@
+version = "0.0.1" # version: Option<String>
+
+# entrypoint = [] # entrypoint: Vec<String> e.g ["add", 1, 2]
+[wasi]
+version = "preview_2" # version: Option<bool>
+# http, threads, nn, http, ...: Option<bool>
+
+# [mount]
+# "relative/path" = "/path/in/runtime"
+# "/absolute/path/to/file" = "/another/path/in/runtime"
