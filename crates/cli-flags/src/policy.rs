@@ -11,7 +11,7 @@ use crate::{WasiOptions, WasmOptions};
 struct ParsedPolicyOptions {
     version: Option<String>,
     wasi: Option<WasiPolicyOptions>,
-    entrypoint: Option<Vec<String>>,
+    entrypoint: Option<String>,
     mount: HashMap<String, String>,
 }
 
@@ -32,7 +32,7 @@ struct WasiPolicyOptions {
 pub struct PolicyOptions {
     pub wasi: WasiOptions,
     pub wasm: WasmOptions,
-    pub entrypoint: Option<Vec<String>>,
+    pub entrypoint: Option<String>,
     pub mounts: HashMap<String, String>,
 }
 
@@ -78,6 +78,7 @@ impl PolicyOptions {
         policy.wasi.http = options.wasi.as_ref().and_then(|w| w.http).or(Some(false));
 
         policy.mounts = options.mount;
+        policy.entrypoint = options.entrypoint;
 
         // todo!("add rest of options");
         Ok(policy)

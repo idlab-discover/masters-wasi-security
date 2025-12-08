@@ -93,7 +93,18 @@ impl RunCommand {
             temp.extend(policy.mounts);
             temp.extend(self.run.dirs);
             self.run.dirs = temp;
+            println!("{:?}", self.run.dirs);
+
+            println!("{:?}", self.invoke);
+            if let Some(entrypoint) = policy.entrypoint {
+                if None == self.invoke {
+                    self.invoke = Some(entrypoint);
+                }
+            }
+            println!("{:?}", self.invoke);
         }
+
+
         self.run.common.init_logging()?;
 
         let mut config = self.run.common.config(None)?;

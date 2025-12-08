@@ -1,13 +1,12 @@
 version = "0.0.1" # version: Option<String>
+# entrypoint = "lorem()" # entrypoint: Option<String>
 
-# entrypoint = [] # entrypoint: Vec<String> e.g ["add", 1, 2]
 [wasi]
 version = "preview_2" # version: Option<bool>
-# http, threads, nn, http, ...: Option<bool>
+# tls, nn, threads, http, tcp, udp, inherit_env, nn, http, ...: Option<bool>
+# TODO nn-graph
 
 [mount]
 "." = "/"
 # "relative/path" = "/path/in/runtime"
 # "/absolute/path/to/file" = "/another/path/in/runtime"
-
-entrypoint = "lorem"
