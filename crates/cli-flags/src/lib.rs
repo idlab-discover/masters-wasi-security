@@ -1,6 +1,4 @@
 //! Contains the common Wasmtime command line interface (CLI) flags.
-pub mod policy;
-
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::Deserialize;
@@ -10,8 +8,6 @@ use std::{
     time::Duration,
 };
 use wasmtime::Config;
-
-use crate::policy::PolicyOptions;
 
 pub mod opt;
 
@@ -585,10 +581,6 @@ pub struct CommonOptions {
     #[arg(long = "config", value_name = "FILE")]
     #[serde(skip)]
     pub config: Option<PathBuf>,
-
-    #[arg(long = "policy-file", value_name = "FILE")]
-    #[serde(skip)]
-    pub policy_file: Option<PathBuf>,
 }
 
 macro_rules! match_feature {
@@ -629,7 +621,6 @@ impl CommonOptions {
             wasi: Default::default(),
             target: None,
             config: None,
-            policy_file: None,
         }
     }
 
@@ -645,12 +636,6 @@ impl CommonOptions {
             self.debug = toml_options.debug;
             self.wasm = toml_options.wasm;
             self.wasi = toml_options.wasi;
-        }
-        // if policy file is defined it's prioritized over the config file.
-        if let Some(policy_file_path) = &self.policy_file {
-            let policy_options = PolicyOptions::from_file(policy_file_path)?;
-            self.wasm = policy_options.wasm;
-            self.wasi = policy_options.wasi;
         }
 
         // CLI args have the highest priority.
@@ -1243,16 +1228,12 @@ impl fmt::Display for CommonOptions {
             configured,
             target,
             config,
-            policy_file,
         } = self;
         if let Some(target) = target {
             write!(f, "--target {target} ")?;
         }
         if let Some(config) = config {
             write!(f, "--config {} ", config.display())?;
-        }
-        if let Some(policy_file) = policy_file{
-            write!(f, "--policy-file {} ", policy_file.display())?;
         }
 
         let codegen_flags;

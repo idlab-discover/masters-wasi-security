@@ -2,11 +2,17 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::fs;
 use std::net::TcpListener;
 use std::{fs::File, path::Path, time::Duration};
 use wasmtime::{Engine, Module, Precompiled, StoreLimits, StoreLimitsBuilder};
 use wasmtime_cli_flags::{CommonOptions, opt::WasmtimeOptionValue};
-use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::{
+    WasiCtxBuilder,
+    PolicyOptions,
+};
 
 #[cfg(feature = "component-model")]
 use wasmtime::component::Component;
@@ -97,6 +103,13 @@ pub struct RunCommon {
     /// cause the environment variable `FOO` to be inherited.
     #[arg(long = "env", number_of_values = 1, value_name = "NAME[=VAL]", value_parser = parse_env_var)]
     pub vars: Vec<(String, Option<String>)>,
+
+    /// Pass a policy file to configure WASI policies.
+    /// 
+    /// Only relevant for WASI programs (component-model).
+    /// The policy file is a TOML file that specifies various WASI options 
+    #[arg(long = "policy", value_name = "FILE", value_parser = parse_policy_file)]
+    pub policy_file: Option<PolicyOptions>,
 }
 
 fn parse_env_var(s: &str) -> Result<(String, Option<String>)> {
@@ -115,6 +128,45 @@ fn parse_dirs(s: &str) -> Result<(String, String)> {
         None => host,
     };
     Ok((host.into(), guest.into()))
+}
+
+#[derive(Deserialize)]
+struct ParsePolicyFile {
+    env: Option<HashMap<String, String>>,
+    arguments: Option<Vec<String>>,
+    storage: Option<ParsePolicyStorageOptions>,
+}
+
+#[derive(Deserialize)]
+struct ParsePolicyStorageOptions {
+    readonly: Option<Vec<String>>,
+    mount: Option<Vec<String>>,
+}
+
+fn parse_policy_file(s: &str) -> Result<PolicyOptions> {
+    let file_contents = fs::read_to_string(s)
+        .with_context(|| format!("failed to read policy file: {:?}", s))?;
+    let parsed_options = toml::from_str::<ParsePolicyFile>(&file_contents)
+        .with_context(|| format!("failed to parse policy file: {:?}", s))?;
+    let mut options = PolicyOptions {
+        env: parsed_options.env,
+        arguments: parsed_options.arguments,
+        storage: Default::default(),
+    };
+
+    if let Some(storage) = parsed_options.storage {
+        if let Some(readonly) = storage.readonly {
+            options.storage.readononly = readonly.into_iter()
+                .map(|ab| parse_dirs(&ab))
+                .collect::<Result<Vec<(String, String)>>>()?;
+        }
+        if let Some(mount) = storage.mount {
+            options.storage.mount = mount.into_iter()
+                .map(|ab| parse_dirs(&ab))
+                .collect::<Result<Vec<(String, String)>>>()?;
+        }
+    }
+    Ok(options)
 }
 
 impl RunCommon {

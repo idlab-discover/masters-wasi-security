@@ -1,0 +1,65 @@
+# version: String
+# version of the policy file
+version = "0.0.1"
+
+# entrypoint: Option<String> default: "run()" (as per wasi spec)
+# if arguments is defined this can't be defined and vice versa
+# what function to call at the start of execution
+entrypoint = 'foo("bar", 1)'
+
+# arguments: Option<Vec<String>> default: []
+# if entrypoint is defined this can't be defined and vice versa
+arguments = ["-S", "help"]
+
+# wasi_version: Option<String> default: defined by version of policy_file
+# the version of wasi the runtime has to use.
+wasi_version = "preview_2"
+
+
+# specify network options
+[network]
+# listen: Option<String> default: []
+# "port/protocol" or "port" or.
+# if no protocol is defined both udp and tcp are allowed.
+# use this in case you want to host a service on a port
+listen = [
+  "*:8080",
+  "127.0.0.1:3000/udp",
+  "10.0.0.2:443/tcp"
+]
+
+# connect: Option<String> default: []
+# "port/protocol" or "port".
+# if no protocol is defined both udp and tcp are allowed.
+# dictates what ports the guest is allowed to connect to (e.g. only allow acces to websites)
+connect = [
+  "*:443,80/tcp",
+  "db.example.com:5432"
+]
+
+# name_resolution: Option<Bool> default: false
+# akin to: guest is allowed to use the getaddrinfo() in POSIX
+name_resolution = true
+
+
+[env]
+# acts as a hash table
+# env_var_name = value
+foo = "bar"
+"bar" = "foo"
+
+[storage]
+readonly = [
+  "/home/matthias::/",
+]
+
+# allows both read and write
+mount = [
+]
+
+[[extention]]
+name = "wasi:http"
+callables = [
+  "fetch",
+  "subscribe"
+]

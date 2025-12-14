@@ -8,7 +8,6 @@
 use crate::common::{Profile, RunCommon, RunTarget};
 use anyhow::{Context as _, Error, Result, anyhow, bail};
 use clap::Parser;
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -87,22 +86,19 @@ enum CliLinker {
 impl RunCommand {
     /// Executes the command.
     pub fn execute(mut self) -> Result<()> {
-        if let Some(policy_path) = &self.run.common.policy_file {
-            let policy = wasmtime_cli_flags::policy::PolicyOptions::from_file(policy_path)?;
-            let mut temp = vec![];
-            temp.extend(policy.mounts);
-            temp.extend(self.run.dirs);
-            self.run.dirs = temp;
-            println!("{:?}", self.run.dirs);
+        // if let Some(policy_path) = &self.run.common.policy_file {
+        //     let policy = wasmtime_cli_flags::policy::PolicyOptions::from_file(policy_path)?;
+        //     let mut temp = vec![];
+        //     temp.extend(policy.mounts);
+        //     temp.extend(self.run.dirs);
+        //     self.run.dirs = temp;
 
-            println!("{:?}", self.invoke);
-            if let Some(entrypoint) = policy.entrypoint {
-                if None == self.invoke {
-                    self.invoke = Some(entrypoint);
-                }
-            }
-            println!("{:?}", self.invoke);
-        }
+        //     if let Some(entrypoint) = policy.entrypoint {
+        //         if None == self.invoke {
+        //             self.invoke = Some(entrypoint);
+        //         }
+        //     }
+        // }
 
 
         self.run.common.init_logging()?;
@@ -1040,6 +1036,7 @@ impl RunCommand {
     }
 
     fn set_legacy_p1_ctx(&self, store: &mut Store<Host>) -> Result<()> {
+        println!("\n\nonly support for p2 is implemented with policy-file\n\n");
         let mut builder = WasiCtxBuilder::new();
         builder.inherit_stdio().args(&self.compute_argv()?)?;
 
@@ -1094,7 +1091,11 @@ impl RunCommand {
     /// which "p" for WASIpN is more a reference to
     /// `wasmtime-wasi`-vs-`wasi-common` here more than anything else.
     fn set_wasi_ctx(&self, store: &mut Store<Host>) -> Result<()> {
-        let mut builder = wasmtime_wasi::WasiCtxBuilder::new();
+        println!("set_wasi_ctx() in run.rs called");
+        let mut builder = match &self.run.policy_file {
+            Some(policy) => wasmtime_wasi::WasiCtxBuilder::new_from_policy(policy.clone())?,
+            None => wasmtime_wasi::WasiCtxBuilder::new(),
+        };
         builder.inherit_stdio().args(&self.compute_argv()?);
         self.run.configure_wasip2(&mut builder)?;
         let ctx = builder.build_p1();

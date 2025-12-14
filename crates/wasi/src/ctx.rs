@@ -7,6 +7,7 @@ use crate::{DirPerms, FilePerms, OpenMode};
 use anyhow::Result;
 use cap_rand::RngCore;
 use cap_std::ambient_authority;
+use std::collections::HashMap;
 use std::future::Future;
 use std::mem;
 use std::net::SocketAddr;
@@ -44,6 +45,19 @@ pub struct WasiCtxBuilder {
     built: bool,
 }
 
+#[derive(Default, Debug, Clone)]
+pub struct PolicyOptions {
+    pub env : Option<HashMap<String, String>>,
+    pub arguments : Option<Vec<String>>,
+    pub storage : Storage,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct Storage {
+    pub readononly: Vec<(String, String)>,
+    pub mount: Vec<(String, String)>,
+}
+
 impl WasiCtxBuilder {
     /// Creates a builder for a new context with default parameters set.
     ///
@@ -63,7 +77,27 @@ impl WasiCtxBuilder {
     /// These defaults can all be updated via the various builder configuration
     /// methods below.
     pub fn new() -> Self {
+        println!("WasiCtxBuilder::new()");
         Self::default()
+    }
+
+    pub fn new_from_policy(policy: PolicyOptions) -> Result<Self> {
+        let mut builder = Self::new();
+        dbg!(&policy);
+        if let Some(env) = policy.env {
+            builder.envs(&env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<(&str, &str)>>());
+        }
+        if let Some(args) = policy.arguments {
+            builder.args(&args);
+        }
+        for (host_path, guest_path) in policy.storage.readononly {
+            builder.preopened_dir(host_path, guest_path, DirPerms::READ, FilePerms::READ)?;
+        }
+        for (host_path, guest_path) in policy.storage.mount {
+            builder.preopened_dir(host_path, guest_path, DirPerms::all(), FilePerms::all())?;
+        }
+        println!("Done setting up from policy"); 
+        Ok(builder)
     }
 
     /// Provides a custom implementation of stdin to use.
@@ -82,18 +116,21 @@ impl WasiCtxBuilder {
     /// Note that inheriting the process's stdin can also be done through
     /// [`inherit_stdin`](WasiCtxBuilder::inherit_stdin).
     pub fn stdin(&mut self, stdin: impl StdinStream + 'static) -> &mut Self {
+        println!("WasiCtxBuilder::stdin()");
         self.cli.stdin = Box::new(stdin);
         self
     }
 
     /// Same as [`stdin`](WasiCtxBuilder::stdin), but for stdout.
     pub fn stdout(&mut self, stdout: impl StdoutStream + 'static) -> &mut Self {
+        println!("WasiCtxBuilder::stdout()");
         self.cli.stdout = Box::new(stdout);
         self
     }
 
     /// Same as [`stdin`](WasiCtxBuilder::stdin), but for stderr.
     pub fn stderr(&mut self, stderr: impl StdoutStream + 'static) -> &mut Self {
+        println!("WasiCtxBuilder::stderr()");
         self.cli.stderr = Box::new(stderr);
         self
     }
@@ -105,6 +142,7 @@ impl WasiCtxBuilder {
     /// when using this it's typically best to have a single wasm instance in
     /// the process using this.
     pub fn inherit_stdin(&mut self) -> &mut Self {
+        println!("WasiCtxBuilder::inherit_stdin()");
         self.stdin(stdin())
     }
 
@@ -114,6 +152,7 @@ impl WasiCtxBuilder {
     /// Note that unlike [`inherit_stdin`](WasiCtxBuilder::inherit_stdin)
     /// multiple instances printing to stdout works well.
     pub fn inherit_stdout(&mut self) -> &mut Self {
+        println!("WasiCtxBuilder::inherit_stdout()");
         self.stdout(stdout())
     }
 
@@ -123,6 +162,7 @@ impl WasiCtxBuilder {
     /// Note that unlike [`inherit_stdin`](WasiCtxBuilder::inherit_stdin)
     /// multiple instances printing to stderr works well.
     pub fn inherit_stderr(&mut self) -> &mut Self {
+        println!("WasiCtxBuilder::inherit_stderr()");
         self.stderr(stderr())
     }
 
@@ -133,6 +173,7 @@ impl WasiCtxBuilder {
     /// on why this should only be done in situations of
     /// one-instance-per-process.
     pub fn inherit_stdio(&mut self) -> &mut Self {
+        println!("WasiCtxBuilder::inherit_stdio()");
         self.inherit_stdin().inherit_stdout().inherit_stderr()
     }
 
@@ -163,6 +204,7 @@ impl WasiCtxBuilder {
     ///
     /// [`Config::async_support`]: https://docs.rs/wasmtime/latest/wasmtime/struct.Config.html#method.async_support
     pub fn allow_blocking_current_thread(&mut self, enable: bool) -> &mut Self {
+        println!("WasiCtxBuilder::allow_blocking_current_thread({})", enable);
         self.filesystem.allow_blocking_current_thread = enable;
         self
     }
@@ -187,6 +229,11 @@ impl WasiCtxBuilder {
     /// ]);
     /// ```
     pub fn envs(&mut self, env: &[(impl AsRef<str>, impl AsRef<str>)]) -> &mut Self {
+        print!("WasiCtxBuilder::envs([");
+        for (k, v) in env {
+            print!("({}, {}), ", k.as_ref(), v.as_ref());
+        }
+        println!("])");
         self.cli.environment.extend(
             env.iter()
                 .map(|(k, v)| (k.as_ref().to_owned(), v.as_ref().to_owned())),
@@ -208,6 +255,7 @@ impl WasiCtxBuilder {
     /// wasi.env("FOO", "bar");
     /// ```
     pub fn env(&mut self, k: impl AsRef<str>, v: impl AsRef<str>) -> &mut Self {
+        println!("WasiCtxBuilder::env({}, {})", k.as_ref(), v.as_ref());
         self.cli
             .environment
             .push((k.as_ref().to_owned(), v.as_ref().to_owned()));
@@ -220,11 +268,17 @@ impl WasiCtxBuilder {
     /// This will use [`envs`](WasiCtxBuilder::envs) to append all host-defined
     /// environment variables.
     pub fn inherit_env(&mut self) -> &mut Self {
+        println!("WasiCtxBuilder::inherit_env()");
         self.envs(&std::env::vars().collect::<Vec<(String, String)>>())
     }
 
     /// Appends a list of arguments to the argument array to pass to wasm.
     pub fn args(&mut self, args: &[impl AsRef<str>]) -> &mut Self {
+        println!("WasiCtxBuilder::args([");
+        for a in args {
+            println!("{}, ", a.as_ref());
+        }
+        println!("])");
         self.cli
             .arguments
             .extend(args.iter().map(|a| a.as_ref().to_owned()));
@@ -233,6 +287,7 @@ impl WasiCtxBuilder {
 
     /// Appends a single argument to get passed to wasm.
     pub fn arg(&mut self, arg: impl AsRef<str>) -> &mut Self {
+        println!("WasiCtxBuilder::arg({})", arg.as_ref());
         self.cli.arguments.push(arg.as_ref().to_owned());
         self
     }
@@ -240,6 +295,7 @@ impl WasiCtxBuilder {
     /// Appends all host process arguments to the list of arguments to get
     /// passed to wasm.
     pub fn inherit_args(&mut self) -> &mut Self {
+        println!("WasiCtxBuilder::inherit_args()");
         self.args(&std::env::args().collect::<Vec<String>>())
     }
 
@@ -296,6 +352,7 @@ impl WasiCtxBuilder {
         dir_perms: DirPerms,
         file_perms: FilePerms,
     ) -> Result<&mut Self> {
+        println!("WasiCtxBuilder::preopened_dir({}, {}, {:?}, {:?})", host_path.as_ref().display(), guest_path.as_ref(), dir_perms, file_perms);
         let dir = cap_std::fs::Dir::open_ambient_dir(host_path.as_ref(), ambient_authority())?;
         let mut open_mode = OpenMode::empty();
         if dir_perms.contains(DirPerms::READ) {
@@ -328,6 +385,7 @@ impl WasiCtxBuilder {
     /// and ideally should use the insecure random API otherwise, so using any
     /// prerecorded or otherwise predictable data may compromise security.
     pub fn secure_random(&mut self, random: impl RngCore + Send + 'static) -> &mut Self {
+        println!("WasiCtxBuilder::secure_random()");
         self.random.random = Box::new(random);
         self
     }
@@ -337,6 +395,7 @@ impl WasiCtxBuilder {
     /// The `insecure_random` generator provided will be used for all randomness
     /// requested by the `wasi:random/insecure` interface.
     pub fn insecure_random(&mut self, insecure_random: impl RngCore + Send + 'static) -> &mut Self {
+        println!("WasiCtxBuilder::insecure_random()");
         self.random.insecure_random = Box::new(insecure_random);
         self
     }
@@ -346,6 +405,7 @@ impl WasiCtxBuilder {
     ///
     /// By default this number is randomly generated when a builder is created.
     pub fn insecure_random_seed(&mut self, insecure_random_seed: u128) -> &mut Self {
+        println!("WasiCtxBuilder::insecure_random_seed({})", insecure_random_seed);
         self.random.insecure_random_seed = insecure_random_seed;
         self
     }
@@ -354,6 +414,7 @@ impl WasiCtxBuilder {
     ///
     /// By default the host's wall clock is used.
     pub fn wall_clock(&mut self, clock: impl HostWallClock + 'static) -> &mut Self {
+        println!("WasiCtxBuilder::wall_clock()");
         self.clocks.wall_clock = Box::new(clock);
         self
     }
@@ -362,6 +423,7 @@ impl WasiCtxBuilder {
     ///
     /// By default the host's monotonic clock is used.
     pub fn monotonic_clock(&mut self, clock: impl HostMonotonicClock + 'static) -> &mut Self {
+        println!("WasiCtxBuilder::monotonic_clock()");
         self.clocks.monotonic_clock = Box::new(clock);
         self
     }
@@ -374,6 +436,7 @@ impl WasiCtxBuilder {
     ///
     /// See also [`WasiCtxBuilder::socket_addr_check`].
     pub fn inherit_network(&mut self) -> &mut Self {
+        println!("WasiCtxBuilder::inherit_network()");
         self.socket_addr_check(|_, _| Box::pin(async { true }))
     }
 
@@ -388,6 +451,7 @@ impl WasiCtxBuilder {
             + Sync
             + 'static,
     {
+        println!("WasiCtxBuilder::socket_addr_check()");
         self.sockets.socket_addr_check = SocketAddrCheck::new(check);
         self
     }
@@ -396,6 +460,7 @@ impl WasiCtxBuilder {
     ///
     /// By default this is disabled.
     pub fn allow_ip_name_lookup(&mut self, enable: bool) -> &mut Self {
+        println!("WasiCtxBuilder::allow_ip_name_lookup({})", enable);
         self.sockets.allowed_network_uses.ip_name_lookup = enable;
         self
     }
@@ -405,6 +470,7 @@ impl WasiCtxBuilder {
     /// This is enabled by default, but can be disabled if UDP should be blanket
     /// disabled.
     pub fn allow_udp(&mut self, enable: bool) -> &mut Self {
+        println!("WasiCtxBuilder::allow_udp({})", enable);
         self.sockets.allowed_network_uses.udp = enable;
         self
     }
@@ -414,6 +480,7 @@ impl WasiCtxBuilder {
     /// This is enabled by default, but can be disabled if TCP should be blanket
     /// disabled.
     pub fn allow_tcp(&mut self, enable: bool) -> &mut Self {
+        println!("WasiCtxBuilder::allow_tcp({})", enable);
         self.sockets.allowed_network_uses.tcp = enable;
         self
     }
@@ -429,6 +496,7 @@ impl WasiCtxBuilder {
     /// used to create only a single [`WasiCtx`]. Repeated usage of this method
     /// is not allowed and should use a second builder instead.
     pub fn build(&mut self) -> WasiCtx {
+        println!("WasiCtxBuilder::build()");
         assert!(!self.built);
 
         let Self {
@@ -466,6 +534,7 @@ impl WasiCtxBuilder {
     /// instead.
     #[cfg(feature = "p1")]
     pub fn build_p1(&mut self) -> crate::p1::WasiP1Ctx {
+        println!("WasiCtxBuilder::build_p1()");
         let wasi = self.build();
         crate::p1::WasiP1Ctx::new(wasi)
     }
@@ -526,6 +595,7 @@ pub struct WasiCtx {
 impl WasiCtx {
     /// Convenience function for calling [`WasiCtxBuilder::new`].
     pub fn builder() -> WasiCtxBuilder {
+        println!("WasiCtx::builder()");
         WasiCtxBuilder::new()
     }
 
