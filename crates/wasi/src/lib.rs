@@ -33,7 +33,7 @@ pub mod sockets;
 mod view;
 
 pub use self::clocks::{HostMonotonicClock, HostWallClock};
-pub use self::ctx::{WasiCtx, WasiCtxBuilder, PolicyOptions};
+pub use self::ctx::{WasiCtx, WasiCtxBuilder, PolicyOptions, NetworkRule, NetworkRuleProtocol};
 pub use self::error::{I32Exit, TrappableError};
 pub use self::filesystem::{DirPerms, FilePerms, OpenMode};
 pub use self::random::{Deterministic, thread_rng};

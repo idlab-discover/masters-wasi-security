@@ -49,14 +49,39 @@ pub struct WasiCtxBuilder {
 pub struct PolicyOptions {
     pub env : Option<HashMap<String, String>>,
     pub arguments : Option<Vec<String>>,
-    pub storage : Storage,
+    pub storage_readonly : Vec<(String, String)>,
+    pub storage_mount : Vec<(String, String)>,
+    pub network_bind : Vec<NetworkRule>,
+    pub network_connect : Vec<NetworkRule>,
+    pub allow_ip_name_lookup : bool,
 }
 
-#[derive(Default, Debug, Clone)]
-pub struct Storage {
-    pub readononly: Vec<(String, String)>,
-    pub mount: Vec<(String, String)>,
+#[derive(Debug, Clone)]
+pub struct NetworkRule {
+    pub socket: SocketAddr,
+    pub protocol: NetworkRuleProtocol,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkRuleProtocol {
+    TCP,
+    UDP,
+    BOTH,
+}
+
+impl NetworkRule {
+    fn matches(&self, protocol: NetworkRuleProtocol, addr: SocketAddr) -> bool {
+        if self.protocol != NetworkRuleProtocol::BOTH && protocol != self.protocol {
+            return false;
+        }
+        if !self.socket.ip().is_unspecified() && self.socket.ip() != addr.ip() {
+            return false;
+        }
+        self.socket.port() == 0 || self.socket.port() == addr.port()
+    }
+}
+
+
 
 impl WasiCtxBuilder {
     /// Creates a builder for a new context with default parameters set.
@@ -90,12 +115,23 @@ impl WasiCtxBuilder {
         if let Some(args) = policy.arguments {
             builder.args(&args);
         }
-        for (host_path, guest_path) in policy.storage.readononly {
+        for (host_path, guest_path) in policy.storage_readonly {
             builder.preopened_dir(host_path, guest_path, DirPerms::READ, FilePerms::READ)?;
         }
-        for (host_path, guest_path) in policy.storage.mount {
+        for (host_path, guest_path) in policy.storage_mount {
             builder.preopened_dir(host_path, guest_path, DirPerms::all(), FilePerms::all())?;
         }
+
+        builder.socket_addr_check(move |addr, reason| {
+            let allowed = match reason {
+                SocketAddrUse::TcpBind => policy.network_bind.iter().any(|r| r.matches(NetworkRuleProtocol::TCP, addr)),
+                SocketAddrUse::UdpBind => policy.network_bind.iter().any(|r| r.matches(NetworkRuleProtocol::UDP, addr)),
+
+                SocketAddrUse::TcpConnect => policy.network_connect.iter().any(|r| r.matches(NetworkRuleProtocol::TCP, addr)),
+                SocketAddrUse::UdpConnect | SocketAddrUse::UdpOutgoingDatagram => policy.network_connect.iter().any(|r| r.matches(NetworkRuleProtocol::UDP, addr)),
+            };
+            Box::pin(async move { allowed })
+        });
         println!("Done setting up from policy"); 
         Ok(builder)
     }

@@ -22,8 +22,8 @@ wasi_version = "preview_2"
 # "port/protocol" or "port" or.
 # if no protocol is defined both udp and tcp are allowed.
 # use this in case you want to host a service on a port
-listen = [
-  "*:8080",
+bind = [
+  "0.0.0.0:8080",
   "127.0.0.1:3000/udp",
   "10.0.0.2:443/tcp"
 ]
@@ -33,8 +33,8 @@ listen = [
 # if no protocol is defined both udp and tcp are allowed.
 # dictates what ports the guest is allowed to connect to (e.g. only allow acces to websites)
 connect = [
-  "*:443,80/tcp",
-  "db.example.com:5432"
+  "0.0.0.0:3006/tcp",
+  "192.168.1.22:80"
 ]
 
 # name_resolution: Option<Bool> default: false
