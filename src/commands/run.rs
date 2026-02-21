@@ -1091,7 +1091,7 @@ impl RunCommand {
     /// which "p" for WASIpN is more a reference to
     /// `wasmtime-wasi`-vs-`wasi-common` here more than anything else.
     fn set_wasi_ctx(&self, store: &mut Store<Host>) -> Result<()> {
-        println!("set_wasi_ctx() in run.rs called");
+        // println!("set_wasi_ctx() in run.rs called");
         let mut builder = match &self.run.policy_file {
             Some(policy) => wasmtime_wasi::WasiCtxBuilder::new_from_policy(policy.clone())?,
             None => wasmtime_wasi::WasiCtxBuilder::new(),

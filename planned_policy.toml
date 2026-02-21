@@ -9,12 +9,11 @@ entrypoint = 'foo("bar", 1)'
 
 # arguments: Option<Vec<String>> default: []
 # if entrypoint is defined this can't be defined and vice versa
-arguments = ["-S", "help"]
+# arguments = ["-S", "help"]
 
 # wasi_version: Option<String> default: defined by version of policy_file
 # the version of wasi the runtime has to use.
 wasi_version = "preview_2"
-
 
 # specify network options
 [network]
@@ -33,7 +32,7 @@ bind = [
 # if no protocol is defined both udp and tcp are allowed.
 # dictates what ports the guest is allowed to connect to (e.g. only allow acces to websites)
 connect = [
-  "0.0.0.0:3006/tcp",
+	#   "0.0.0.0:3006/tcp",
   "192.168.1.22:80"
 ]
 
@@ -45,19 +44,20 @@ name_resolution = true
 [env]
 # acts as a hash table
 # env_var_name = value
-foo = "bar"
+# foo = "bar"
 "bar" = "foo"
 
 [storage]
 readonly = [
-  "/home/matthias::/",
+   "/home/matthias/RustroverProjects::/",
 ]
 
 # allows both read and write
 mount = [
 ]
 
-[[extention]]
+
+[[extension]]
 name = "wasi:http"
 callables = [
   "fetch",
