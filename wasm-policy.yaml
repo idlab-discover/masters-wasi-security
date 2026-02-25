@@ -31,5 +31,13 @@ packages:
                 allow: false
               write:
                 allow: false # but this overwrites the higher level allow
+  wasi:cli:
+    allow: false # this overwrites the default allow for all functions in this package
+    interfaces:
+      stdin:
+        allow: true # this overwrites the deny for all functions in this package
+      stdout:
+        allow: true
+    
 
 

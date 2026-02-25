@@ -95,13 +95,19 @@ impl WasmPolicy {
     /// function name is allowed to be called according to this policy.
     ///
     /// The resolution order (most specific wins):
-    /// 1. Function-level `allow` within a resource
-    /// 2. Resource-level `allow`
+    /// 1. Function-level `allow` within a resource (if `resource` is provided)
+    /// 2. Resource-level `allow` (if `resource` is provided)
     /// 3. Function-level `allow` within an interface (freestanding functions)
     /// 4. Interface-level `allow`
     /// 5. Package-level `allow`
     /// 6. `default-mode`
-    pub fn is_allowed(&self, package: &str, interface: &str, resource: Option<&str>, function_name: &str) -> bool {
+    pub fn is_allowed(
+        &self,
+        package: &str,
+        interface: &str,
+        resource: Option<&str>,
+        function_name: &str,
+    ) -> bool {
         let default_allowed = match self.default_mode {
             DefaultMode::Allow => true,
             DefaultMode::Deny => false,
@@ -121,31 +127,20 @@ impl WasmPolicy {
 
         let iface_allowed = iface.allow.unwrap_or(pkg_allowed);
 
+        if let Some(resource) = resource {
+            if let Some(resource) = iface.resources.get(resource) {
+                if let Some(func) = resource.functions.get(function_name) {
+                    return func.allow;
+                }
+                if let Some(allow) = resource.allow {
+                    return allow;
+                }
+            }
+        }
+
         // Check freestanding functions in the interface
         if let Some(func) = iface.functions.get(function_name) {
             return func.allow;
-        }
-
-        // Check functions inside resources.
-        // Since we don't know which resource the function belongs to from the
-        // linker metadata alone, we search all resources for a matching function name.
-        for (_resource_name, resource) in &iface.resources {
-            if let Some(func) = resource.functions.get(function_name) {
-                return func.allow;
-            }
-            // If the resource has a top-level allow and the function is not
-            // explicitly listed, use the resource-level allow.
-        }
-
-        // Check if any resource has a top-level allow that might apply.
-        // This is a fallback for functions that belong to a resource but
-        // aren't explicitly listed.
-        for (_resource_name, resource) in &iface.resources {
-            if resource.allow.is_some() {
-                // We can't determine resource membership from function name alone,
-                // so we only use resource-level allow if the function name is not
-                // found anywhere. Fall through to interface-level default.
-            }
         }
 
         iface_allowed
