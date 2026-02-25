@@ -27,6 +27,19 @@ pub struct HostFunc {
     func: Box<dyn Any + Send + Sync>,
 }
 
+#[derive(Debug)]
+pub struct HostFuncMetadata {
+    pub allowed_to_use: bool,
+    pub name: String,
+    pub interface: String,
+    pub package: String, // TODO: check if option is needed
+}
+
+struct HostFuncWithMetadata<F> {
+    func: F,
+    metadata: HostFuncMetadata,
+}
+
 impl core::fmt::Debug for HostFunc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("HostFunc").finish_non_exhaustive()
@@ -40,7 +53,7 @@ enum HostResult<T> {
 }
 
 impl HostFunc {
-    fn from_canonical<T, F, P, R>(func: F) -> Arc<HostFunc>
+    fn from_canonical<T, F, P, R>(func: F, metadata: HostFuncMetadata) -> Arc<HostFunc>
     where
         F: Fn(StoreContextMut<'_, T>, Instance, P) -> HostResult<R> + Send + Sync + 'static,
         P: ComponentNamedList + Lift + 'static,
@@ -51,11 +64,11 @@ impl HostFunc {
         Arc::new(HostFunc {
             entrypoint,
             typecheck: Box::new(typecheck::<P, R>),
-            func: Box::new(func),
+            func: Box::new(HostFuncWithMetadata::<F> { func, metadata }),
         })
     }
 
-    pub(crate) fn from_closure<T, F, P, R>(func: F) -> Arc<HostFunc>
+    pub(crate) fn from_closure<T, F, P, R>(func: F, metadata: HostFuncMetadata) -> Arc<HostFunc>
     where
         T: 'static,
         F: Fn(StoreContextMut<T>, P) -> Result<R> + Send + Sync + 'static,
@@ -64,11 +77,11 @@ impl HostFunc {
     {
         Self::from_canonical::<T, _, _, _>(move |store, _, params| {
             HostResult::Done(func(store, params))
-        })
+        }, metadata)
     }
 
     #[cfg(feature = "component-model-async")]
-    pub(crate) fn from_concurrent<T, F, P, R>(func: F) -> Arc<HostFunc>
+    pub(crate) fn from_concurrent<T, F, P, R>(func: F, metadata: HostFuncMetadata) -> Arc<HostFunc>
     where
         T: 'static,
         F: Fn(&Accessor<T>, P) -> Pin<Box<dyn Future<Output = Result<R>> + Send + '_>>
@@ -84,7 +97,7 @@ impl HostFunc {
             HostResult::Future(Box::pin(
                 instance.wrap_call(store, move |accessor| func(accessor, params)),
             ))
-        })
+        }, metadata)
     }
 
     extern "C" fn entrypoint<T, F, P, R>(
@@ -101,7 +114,17 @@ impl HostFunc {
         R: ComponentNamedList + Lower + 'static,
         T: 'static,
     {
-        let data = SendSyncPtr::new(NonNull::new(data.as_ptr() as *mut F).unwrap());
+        let data = SendSyncPtr::new(NonNull::new(data.as_ptr() as *mut HostFuncWithMetadata<F>).unwrap());
+        let host_data = unsafe { data.as_ref() };
+        println!("Calling host function `{:?}`", host_data.metadata);
+        if !host_data.metadata.allowed_to_use {
+            panic!(
+                "Host function `{}`/`{}`:`{}` is not allowed to be used",
+                host_data.metadata.package,
+                host_data.metadata.interface,
+                host_data.metadata.name
+            );
+        }
         unsafe {
             call_host_and_handle_result::<T>(cx, |store, instance| {
                 call_host(
@@ -110,13 +133,13 @@ impl HostFunc {
                     TypeFuncIndex::from_u32(ty),
                     OptionsIndex::from_u32(options),
                     NonNull::slice_from_raw_parts(storage, storage_len).as_mut(),
-                    move |store, instance, args| (*data.as_ptr())(store, instance, args),
+                    move |store, instance, args| (host_data.func)(store, instance, args),
                 )
             })
         }
     }
 
-    fn new_dynamic_canonical<T, F>(func: F) -> Arc<HostFunc>
+    fn new_dynamic_canonical<T, F>(func: F, metadata: HostFuncMetadata) -> Arc<HostFunc>
     where
         F: Fn(
                 StoreContextMut<'_, T>,
@@ -135,11 +158,11 @@ impl HostFunc {
             // not need to perform up-front type checks. Instead everything is
             // dynamically managed at runtime.
             typecheck: Box::new(move |_expected_index, _expected_types| Ok(())),
-            func: Box::new(func),
+            func: Box::new(HostFuncWithMetadata::<F> {func, metadata})
         })
     }
 
-    pub(crate) fn new_dynamic<T: 'static, F>(func: F) -> Arc<HostFunc>
+    pub(crate) fn new_dynamic<T: 'static, F>(func: F, metadata: HostFuncMetadata) -> Arc<HostFunc>
     where
         F: Fn(StoreContextMut<'_, T>, &[Val], &mut [Val]) -> Result<()> + Send + Sync + 'static,
     {
@@ -148,12 +171,12 @@ impl HostFunc {
                 let (params, results) = params_and_results.split_at_mut(result_start);
                 let result = func(store, params, results).map(move |()| params_and_results);
                 Box::pin(async move { result })
-            },
+            }, metadata
         )
     }
 
     #[cfg(feature = "component-model-async")]
-    pub(crate) fn new_dynamic_concurrent<T, F>(func: F) -> Arc<HostFunc>
+    pub(crate) fn new_dynamic_concurrent<T, F>(func: F, metadata: HostFuncMetadata) -> Arc<HostFunc>
     where
         T: 'static,
         F: for<'a> Fn(
@@ -176,7 +199,7 @@ impl HostFunc {
                         Ok(params_and_results)
                     })
                 }))
-            },
+            }, metadata
         )
     }
 
@@ -939,7 +962,9 @@ where
         + 'static,
     T: 'static,
 {
-    let data = SendSyncPtr::new(NonNull::new(data.as_ptr() as *mut F).unwrap());
+    let data = SendSyncPtr::new(NonNull::new(data.as_ptr() as *mut HostFuncWithMetadata<F>).unwrap());
+    let host_data = unsafe { data.as_ref() };
+    println!("Calling host function `{}`", host_data.metadata.name);
     unsafe {
         call_host_and_handle_result(cx, |store, instance| {
             call_host_dynamic::<T, _>(
@@ -949,7 +974,7 @@ where
                 OptionsIndex::from_u32(options),
                 NonNull::slice_from_raw_parts(storage, storage_len).as_mut(),
                 move |store, instance, params, results| {
-                    (*data.as_ptr())(store, instance, params, results)
+                    (host_data.func)(store, instance, params, results)
                 },
             )
         })

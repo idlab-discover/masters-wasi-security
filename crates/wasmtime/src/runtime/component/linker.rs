@@ -1,6 +1,6 @@
 #[cfg(feature = "component-model-async")]
 use crate::component::concurrent::Accessor;
-use crate::component::func::HostFunc;
+use crate::component::func::{HostFunc, HostFuncMetadata};
 use crate::component::instance::RuntimeImport;
 use crate::component::matching::{InstanceType, TypeChecker};
 use crate::component::types;
@@ -429,8 +429,31 @@ impl<T: 'static> LinkerInstance<'_, T> {
         Params: ComponentNamedList + Lift + 'static,
         Return: ComponentNamedList + Lower + 'static,
     {
-        self.insert(name, Definition::Func(HostFunc::from_closure(func)))?;
+        let metadata = self.provide_host_func_metadata(name);
+        self.insert(name, Definition::Func(HostFunc::from_closure(func, metadata)))?;
         Ok(())
+    }
+
+    /// Provides metadata for a host function being defined.
+    /// Which can then be used at runtime when a function is called
+    /// to be able to perform some logic on it.
+    pub fn provide_host_func_metadata(&mut self, name: &str) -> HostFuncMetadata {
+        let mut full_path = self.strings.strings[self.path[0]].as_ref().to_string();
+        if let Some(index) = full_path.rfind('@') {
+            full_path.truncate(index);
+        }
+        // println!("defining host function `{name}` which has path: {:?}", full_path);
+        if let Some((package, interface)) = full_path.split_once('/') {
+            HostFuncMetadata {
+                allowed_to_use: package != "wasi:cli",
+                name: name.to_string(),
+                interface: interface.to_string(),
+                package: package.to_string(),
+            }
+        }
+        else {
+            panic!("full_path `{full_path}` does not contain a `/` character, which is required to separate the package and interface name");
+        }
     }
 
     /// Defines a new host-provided async function into this [`LinkerInstance`].
@@ -559,7 +582,8 @@ impl<T: 'static> LinkerInstance<'_, T> {
             self.engine.config().async_support,
             "cannot use `func_wrap_concurrent` without enabling async support in the config"
         );
-        self.insert(name, Definition::Func(HostFunc::from_concurrent(f)))?;
+        let metadata = self.provide_host_func_metadata(name);
+        self.insert(name, Definition::Func(HostFunc::from_concurrent(f, metadata)))?;
         Ok(())
     }
 
@@ -667,7 +691,8 @@ impl<T: 'static> LinkerInstance<'_, T> {
         name: &str,
         func: impl Fn(StoreContextMut<'_, T>, &[Val], &mut [Val]) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        self.insert(name, Definition::Func(HostFunc::new_dynamic(func)))?;
+        let metadata = self.provide_host_func_metadata(name);
+        self.insert(name, Definition::Func(HostFunc::new_dynamic(func, metadata)))?;
         Ok(())
     }
 
@@ -723,7 +748,8 @@ impl<T: 'static> LinkerInstance<'_, T> {
             self.engine.config().async_support,
             "cannot use `func_wrap_concurrent` without enabling async support in the config"
         );
-        self.insert(name, Definition::Func(HostFunc::new_dynamic_concurrent(f)))?;
+        let metadata = self.provide_host_func_metadata(name);
+        self.insert(name, Definition::Func(HostFunc::new_dynamic_concurrent(f, metadata)))?;
         Ok(())
     }
 
