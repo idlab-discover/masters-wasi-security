@@ -116,6 +116,7 @@ mod storage;
 pub(crate) mod store;
 pub mod types;
 mod values;
+mod wasm_policy;
 pub use self::component::{Component, ComponentExportIndex};
 #[cfg(feature = "component-model-async")]
 pub use self::concurrent::{
@@ -136,6 +137,7 @@ pub use self::resource_table::{ResourceTable, ResourceTableError};
 pub use self::resources::{Resource, ResourceAny};
 pub use self::types::{ResourceType, Type};
 pub use self::values::Val;
+pub use self::wasm_policy::WasmPolicy;
 
 pub(crate) use self::instance::RuntimeImport;
 pub(crate) use self::resources::HostResourceData;

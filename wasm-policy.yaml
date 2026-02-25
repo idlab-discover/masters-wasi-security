@@ -1,0 +1,35 @@
+# default-mode: defines how default values are chosen
+# default-mode: [allow, deny]
+default-mode: allow
+
+packages:
+  wasi:io:
+    interfaces: 
+      error:
+        resources:
+          error:
+            allow: true
+      poll:
+        resources:
+          pollable:
+            allow: true
+            functions:
+              block:
+                allow: true
+      streams:
+        resources:
+          input-stream:
+            functions:
+              read:
+                allow: true
+              subscribe:
+                allow: true
+          output-stream:
+            allow: true # since allow is defined as true functions in this resource are allowed
+            functions:
+              blocking-write-and-flush:
+                allow: false
+              write:
+                allow: false # but this overwrites the higher level allow
+
+

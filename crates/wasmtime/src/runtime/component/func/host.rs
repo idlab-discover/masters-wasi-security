@@ -31,6 +31,7 @@ pub struct HostFunc {
 pub struct HostFuncMetadata {
     pub allowed_to_use: bool,
     pub name: String,
+    pub resource: Option<String>,
     pub interface: String,
     pub package: String, // TODO: check if option is needed
 }
@@ -119,7 +120,7 @@ impl HostFunc {
         println!("Calling host function `{:?}`", host_data.metadata);
         if !host_data.metadata.allowed_to_use {
             panic!(
-                "Host function `{}`/`{}`:`{}` is not allowed to be used",
+                "Host function `{}/{}:{}` is not allowed to be used",
                 host_data.metadata.package,
                 host_data.metadata.interface,
                 host_data.metadata.name

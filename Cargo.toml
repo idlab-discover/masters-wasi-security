@@ -68,6 +68,7 @@ wat = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 wasmparser = { workspace = true }
 tracing = { workspace = true }
 log = { workspace = true }
@@ -374,6 +375,7 @@ rand = { version = "0.9.2", features = ["small_rng"] }
 serde = { version = "1.0.215", default-features = false, features = ['alloc'] }
 serde_derive = "1.0.188"
 serde_json = "1.0.80"
+serde_yaml = "0.9"
 glob = "0.3.0"
 libfuzzer-sys = "0.4.8"
 walkdir = "2.3.3"

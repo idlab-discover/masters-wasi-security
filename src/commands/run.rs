@@ -75,6 +75,14 @@ pub struct RunCommand {
     /// arguments will be interpreted as arguments to the function specified.
     #[arg(value_name = "WASM", trailing_var_arg = true, required = true)]
     pub module_and_args: Vec<OsString>,
+
+    /// Path to a YAML policy file that controls which host functions are
+    /// allowed to be called by the WebAssembly component.
+    ///
+    /// The policy file uses a `default-mode` of `allow` or `deny` and then
+    /// defines per-package/interface/resource/function overrides.
+    #[arg(long = "wasm-policy", value_name = "FILE")]
+    pub wasm_policy: Option<PathBuf>,
 }
 
 enum CliLinker {
@@ -119,11 +127,35 @@ impl RunCommand {
             }
         }
 
+        // If a wasm policy file was specified, parse it and pass it to the linker.
+        let wasm_policy;
+        if let Some(policy_path) = &self.wasm_policy {
+            #[cfg(feature = "component-model")]
+            {
+                let policy_contents = std::fs::read_to_string(policy_path)
+                    .with_context(|| format!("failed to read wasm policy file `{}`", policy_path.display()))?;
+                wasm_policy = serde_yaml::from_str(&policy_contents)
+                    .with_context(|| format!("failed to parse wasm policy file `{}`", policy_path.display()))?;
+                match &main {
+                    RunTarget::Component(_) => {}, 
+                    _ => {
+                        bail!("--wasm-policy is only supported with components");
+                    }
+                }
+            }
+            #[cfg(not(feature = "component-model"))]
+            {
+                bail!("--wasm-policy requires the component-model feature");
+            }
+        } else {
+            wasm_policy = wasmtime::component::WasmPolicy::new_no_file();
+        }
+
         let mut linker = match &main {
             RunTarget::Core(_) => CliLinker::Core(wasmtime::Linker::new(&engine)),
             #[cfg(feature = "component-model")]
             RunTarget::Component(_) => {
-                CliLinker::Component(wasmtime::component::Linker::new(&engine))
+                CliLinker::Component(wasmtime::component::Linker::new_with_policy(&engine, wasm_policy))
             }
         };
         if let Some(enable) = self.run.common.wasm.unknown_exports_allow {

@@ -4,6 +4,7 @@ use crate::component::func::{HostFunc, HostFuncMetadata};
 use crate::component::instance::RuntimeImport;
 use crate::component::matching::{InstanceType, TypeChecker};
 use crate::component::types;
+use crate::component::wasm_policy::WasmPolicy;
 use crate::component::{
     Component, ComponentNamedList, Instance, InstancePre, Lift, Lower, ResourceType, Val,
 };
@@ -64,6 +65,7 @@ pub struct Linker<T: 'static> {
     map: NameMap<usize, Definition>,
     path: Vec<usize>,
     allow_shadowing: bool,
+    wasm_policy: Arc<WasmPolicy>,
     _marker: marker::PhantomData<fn() -> T>,
 }
 
@@ -75,6 +77,7 @@ impl<T: 'static> Clone for Linker<T> {
             map: self.map.clone(),
             path: self.path.clone(),
             allow_shadowing: self.allow_shadowing,
+            wasm_policy: self.wasm_policy.clone(),
             _marker: self._marker,
         }
     }
@@ -98,6 +101,7 @@ pub struct LinkerInstance<'a, T: 'static> {
     strings: &'a mut Strings,
     map: &'a mut NameMap<usize, Definition>,
     allow_shadowing: bool,
+    wasm_policy: Arc<WasmPolicy>,
     _marker: marker::PhantomData<fn() -> T>,
 }
 
@@ -111,6 +115,19 @@ pub(crate) enum Definition {
 
 impl<T: 'static> Linker<T> {
     /// Creates a new linker for the [`Engine`] specified with no items defined
+    /// within it. But takes an [`WasmPolicy`] to use for host function policy decisions.
+    pub fn new_with_policy(engine: &Engine, wasm_policy: WasmPolicy) -> Linker<T> {
+        Linker {
+            engine: engine.clone(),
+            strings: Strings::default(),
+            map: NameMap::default(),
+            allow_shadowing: false,
+            wasm_policy: Arc::new(wasm_policy),
+            path: Vec::new(),
+            _marker: marker::PhantomData,
+        }
+    }
+    /// Creates a new linker for the [`Engine`] specified with no items defined
     /// within it.
     pub fn new(engine: &Engine) -> Linker<T> {
         Linker {
@@ -118,6 +135,7 @@ impl<T: 'static> Linker<T> {
             strings: Strings::default(),
             map: NameMap::default(),
             allow_shadowing: false,
+            wasm_policy: Arc::new(WasmPolicy::new_no_file()),
             path: Vec::new(),
             _marker: marker::PhantomData,
         }
@@ -147,6 +165,7 @@ impl<T: 'static> Linker<T> {
             strings: &mut self.strings,
             map: &mut self.map,
             allow_shadowing: self.allow_shadowing,
+            wasm_policy: self.wasm_policy.clone(),
             _marker: self._marker,
         }
     }
@@ -388,6 +407,7 @@ impl<T: 'static> LinkerInstance<'_, T> {
             strings: self.strings,
             map: self.map,
             allow_shadowing: self.allow_shadowing,
+            wasm_policy: self.wasm_policy.clone(),
             _marker: self._marker,
         }
     }
@@ -442,11 +462,20 @@ impl<T: 'static> LinkerInstance<'_, T> {
         if let Some(index) = full_path.rfind('@') {
             full_path.truncate(index);
         }
-        // println!("defining host function `{name}` which has path: {:?}", full_path);
         if let Some((package, interface)) = full_path.split_once('/') {
+            let resource: Option<String>;
+            let fname: &str;
+            if let Some((l, r)) = name.split_once(".") { // if function belongs to a resource
+                resource = Some(l.trim_start_matches("[method]").to_string());
+                fname = r;
+            } else {
+                resource = None;
+                fname = name;
+            }
             HostFuncMetadata {
-                allowed_to_use: package != "wasi:cli",
-                name: name.to_string(),
+                allowed_to_use: self.wasm_policy.is_allowed(package, interface, resource.as_deref(), fname),
+                name: fname.to_string(),
+                resource: resource,
                 interface: interface.to_string(),
                 package: package.to_string(),
             }
