@@ -9,7 +9,7 @@ use crate::prelude::*;
 use crate::runtime::vm::component::{
     ComponentInstance, VMComponentContext, VMLowering, VMLoweringCallee,
 };
-use crate::runtime::vm::{SendSyncPtr, VMOpaqueContext, VMStore};
+use crate::runtime::vm::{VMOpaqueContext, VMStore};
 use crate::{AsContextMut, CallHook, StoreContextMut, ValRaw};
 use alloc::sync::Arc;
 use core::any::Any;
@@ -121,7 +121,7 @@ impl HostFunc {
         let host_data = unsafe { data.as_ref() };
         
         unsafe {
-            call_host_and_handle_result::<T>(cx, &host_data.metadata, |store, instance| {
+            call_host_and_handle_result::<T>(cx, &host_data.metadata, TypeFuncIndex::from_u32(ty), |store, instance| {
                 call_host(
                     store,
                     instance,
@@ -257,6 +257,7 @@ where
     Params: Lift,
     Return: Lower + 'static,
 {
+    // aa
     let options = Options::new_index(store.0, instance, options_idx);
     let vminstance = instance.id().get(store.0);
     let opts = &vminstance.component().env_component().options[options_idx];
@@ -695,24 +696,34 @@ pub(crate) fn validate_inbounds<T: ComponentType>(memory: &[u8], ptr: &ValRaw) -
 unsafe fn call_host_and_handle_result<T>(
     cx: NonNull<VMOpaqueContext>,
     metadata: &HostFuncMetadata,
+    ty: TypeFuncIndex,
     func: impl FnOnce(StoreContextMut<'_, T>, Instance) -> Result<()>,
 ) -> bool
 where
     T: 'static,
 {
-    println!("Calling host function `{}`", metadata.name);
-    if !metadata.allowed_to_use {
-        panic!(
-            "Host function `{}/{}:{}` is not allowed to be used",
-            metadata.package,
-            metadata.interface,
-            metadata.name
-        );
-    }
+    
     let cx = unsafe { VMComponentContext::from_opaque(cx) };
     unsafe {
         ComponentInstance::enter_host_from_wasm(cx, |store, instance| {
+            println!("Calling host function `{:?}`", metadata);
+            if !metadata.allowed_to_use {
+                bail!(
+                    "Host function `{}/{}:{}` is not allowed to be used",
+                    metadata.package,
+                    metadata.interface,
+                    metadata.name
+                );
+
+            }
             let mut store = store.unchecked_context_mut();
+            let types = instance.id().get(store.0).component().types().clone();
+            let ty = &types[ty];
+            // param_tys contains InterfaceType maybe we can use this also in the wasm_policy.rs?
+            let param_tys = &types[ty.params].types;
+            println!("Function parameters: {:?}", param_tys);
+            println!("Function param_names: {:?}", ty.param_names);
+
             store.0.call_hook(CallHook::CallingHost)?;
             let res = func(store.as_context_mut(), instance);
             store.0.call_hook(CallHook::ReturningFromHost)?;
@@ -971,7 +982,7 @@ where
     let host_data = unsafe { data.as_ref() };
 
     unsafe {
-        call_host_and_handle_result(cx, &host_data.metadata, |store, instance| {
+        call_host_and_handle_result(cx, &host_data.metadata, TypeFuncIndex::from_u32(ty), |store, instance| {
             call_host_dynamic::<T, _>(
                 store,
                 instance,

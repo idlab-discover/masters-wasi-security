@@ -46,13 +46,13 @@ packages:
                 allow: true
           output-stream:
             allow: true # since allow is defined as true functions in this resource are allowed
-            functions:
-              blocking-write-and-flush:
-                allow: false
-              write:
-                allow: false # but this overwrites the higher level allow
+            # functions:
+            #   blocking-write-and-flush:
+            #     allow: false
+            #   write:
+            #     allow: false # but this overwrites the higher level allow
   wasi:cli:
-    allow: false # this overwrites the default allow for all functions in this package
+    # allow: false # this overwrites the default allow for all functions in this package
     interfaces:
       stdin:
         allow: true # this overwrites the deny for all functions in this package
