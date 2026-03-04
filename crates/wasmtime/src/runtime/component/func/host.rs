@@ -3,6 +3,7 @@ use crate::component::concurrent::{Accessor, Status};
 use crate::component::func::{LiftContext, LowerContext, Options};
 use crate::component::matching::InstanceType;
 use crate::component::storage::slice_to_storage_mut;
+use crate::component::wasm_policy::ArgumentConstraint;
 use crate::component::{ComponentNamedList, ComponentType, Instance, Lift, Lower, Val};
 use crate::prelude::*;
 use crate::runtime::vm::component::{
@@ -34,6 +35,7 @@ pub struct HostFuncMetadata {
     pub resource: Option<String>,
     pub interface: String,
     pub package: String, // TODO: check if option is needed
+    pub arguments: Option<Vec<ArgumentConstraint>>,
 }
 
 struct HostFuncWithMetadata<F> {
@@ -115,19 +117,11 @@ impl HostFunc {
         R: ComponentNamedList + Lower + 'static,
         T: 'static,
     {
-        let data = SendSyncPtr::new(NonNull::new(data.as_ptr() as *mut HostFuncWithMetadata<F>).unwrap());
+        let data = NonNull::new(data.as_ptr() as *mut HostFuncWithMetadata<F>).unwrap();
         let host_data = unsafe { data.as_ref() };
-        println!("Calling host function `{:?}`", host_data.metadata);
-        if !host_data.metadata.allowed_to_use {
-            panic!(
-                "Host function `{}/{}:{}` is not allowed to be used",
-                host_data.metadata.package,
-                host_data.metadata.interface,
-                host_data.metadata.name
-            );
-        }
+        
         unsafe {
-            call_host_and_handle_result::<T>(cx, |store, instance| {
+            call_host_and_handle_result::<T>(cx, &host_data.metadata, |store, instance| {
                 call_host(
                     store,
                     instance,
@@ -700,11 +694,21 @@ pub(crate) fn validate_inbounds<T: ComponentType>(memory: &[u8], ptr: &ValRaw) -
 
 unsafe fn call_host_and_handle_result<T>(
     cx: NonNull<VMOpaqueContext>,
+    metadata: &HostFuncMetadata,
     func: impl FnOnce(StoreContextMut<'_, T>, Instance) -> Result<()>,
 ) -> bool
 where
     T: 'static,
 {
+    println!("Calling host function `{}`", metadata.name);
+    if !metadata.allowed_to_use {
+        panic!(
+            "Host function `{}/{}:{}` is not allowed to be used",
+            metadata.package,
+            metadata.interface,
+            metadata.name
+        );
+    }
     let cx = unsafe { VMComponentContext::from_opaque(cx) };
     unsafe {
         ComponentInstance::enter_host_from_wasm(cx, |store, instance| {
@@ -963,11 +967,11 @@ where
         + 'static,
     T: 'static,
 {
-    let data = SendSyncPtr::new(NonNull::new(data.as_ptr() as *mut HostFuncWithMetadata<F>).unwrap());
+    let data = NonNull::new(data.as_ptr() as *mut HostFuncWithMetadata<F>).unwrap();
     let host_data = unsafe { data.as_ref() };
-    println!("Calling host function `{}`", host_data.metadata.name);
+
     unsafe {
-        call_host_and_handle_result(cx, |store, instance| {
+        call_host_and_handle_result(cx, &host_data.metadata, |store, instance| {
             call_host_dynamic::<T, _>(
                 store,
                 instance,

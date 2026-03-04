@@ -463,21 +463,22 @@ impl<T: 'static> LinkerInstance<'_, T> {
             full_path.truncate(index);
         }
         if let Some((package, interface)) = full_path.split_once('/') {
-            let resource: Option<String>;
+            let resource: Option<&str>;
             let fname: &str;
             if let Some((l, r)) = name.split_once(".") { // if function belongs to a resource
-                resource = Some(l.trim_start_matches("[method]").to_string());
+                resource = Some(l.trim_start_matches("[method]"));
                 fname = r;
             } else {
                 resource = None;
                 fname = name;
             }
             HostFuncMetadata {
-                allowed_to_use: self.wasm_policy.is_allowed(package, interface, resource.as_deref(), fname),
+                allowed_to_use: self.wasm_policy.is_allowed(package, interface, resource, fname),
                 name: fname.to_string(),
-                resource: resource,
+                resource: resource.map(|r| r.to_string()),
                 interface: interface.to_string(),
                 package: package.to_string(),
+                arguments: self.wasm_policy.get_argument_constraints(package, interface, resource, fname),
             }
         }
         else {
