@@ -16,6 +16,10 @@ packages:
             functions:
               block:
                 allow: true
+                arguments:
+                  - type: i32
+                    values: true
+
       streams:
         resources:
           input-stream:

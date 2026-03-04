@@ -132,9 +132,8 @@ impl WasmPolicy {
                 if let Some(func) = resource.functions.get(function_name) {
                     return func.allow;
                 }
-                if let Some(allow) = resource.allow {
-                    return allow;
-                }
+                return resource.allow.unwrap_or(iface_allowed);
+
             }
         }
 
