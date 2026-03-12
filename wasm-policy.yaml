@@ -16,25 +16,23 @@ packages:
             functions:
               block:
                 allow: true
-                # these are just examples to explain the syntax of the arguments field, they do not reflect the actual arguments of the block function in the pollable interface
+                # Each argument constraint uses the WIT type name as the key,
+                # with the list of values to allow or block.
+                # The "allow" field controls whether the listed values are
+                # allowed (true) or blocked (false).
+                # When a value is passed that is NOT in the values list,
+                # the opposite of "allow" applies.
                 arguments:
-                  # - type:  the type of the argument (only primitive types are supported for now)
-                    # values: the values to block/allow for this argument
-                    # allow: whether to block or allow the specified values for this argument when this function is called
-                    ### when a arg is passed of which the value is not defined in the values field, the opposite of the allow field is applied
-                  - type: bool
-                    values: [true]
-                    allow: false # the first arg is a bool an is not allowed to be true when this function is called
-                  - type: s32
-                    values: [10,20,30] # the second arg is an i32 and is only allowed to be 10,20 or 30 when this function is called
-                    allow: true # the second arg is an i32 and is allowed to be 10,20 or 30 when this function is called
-                  - type: string
-                    values: ["hello","world"] 
-                    allow: true # the third arg is a string and is allowed to be "hello" or "world" when this function is called
-                  - type: s32
-                    values: [] # no values to block/allow
-                    allow: false # the fourth arg is an i32 and any value is allowed when this function is called
-                  # if there are more arguments defined in the function signature than in the arguments field, all arguments are allowed
+                  - allow: false
+                    bool: [true]        # arg 0: bool, block value 'true'
+                  - allow: true
+                    s32: [10, 20, 30]   # arg 1: s32, only allow 10/20/30
+                  - allow: true
+                    string: ["hello", "world"]  # arg 2: string, only allow these
+                  - allow: false
+                    s32: []             # arg 3: s32, no values blocked → all allowed
+                  # if there are more arguments in the function signature
+                  # than in this list, all extra arguments are unconstrained
 
       streams:
         resources:
@@ -58,6 +56,14 @@ packages:
         allow: true # this overwrites the deny for all functions in this package
       stdout:
         allow: true
-    
-
-
+  wasi:sockets:
+    interfaces:
+      tcp:
+        resources:
+          tcp-socket:
+            functions:
+              set-keep-alive-enabled:
+                allow: true
+                arguments:
+                  - allow: false
+                    bool: [false]   # arg 0: bool, block value 'true'
