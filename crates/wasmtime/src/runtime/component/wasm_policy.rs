@@ -3,8 +3,8 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use serde::de::{self, MapAccess, Visitor};
 use serde::Deserialize;
+use serde::de::{self, MapAccess, Visitor};
 use wasmtime_environ::component::InterfaceType;
 
 /// Represents the parsed contents of a `wasm-policy.yaml` file.
@@ -35,6 +35,10 @@ use wasmtime_environ::component::InterfaceType;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct WasmPolicy {
+    /// The behaviour when a component does something not allowed by policy.
+    #[serde(default)]
+    pub behaviour_overwrite: BehaviourOverwrite,
+
     /// The default mode for all functions not explicitly listed.
     /// `"allow"` means functions are allowed by default, `"deny"` means denied.
     pub default_mode: DefaultMode,
@@ -42,6 +46,11 @@ pub struct WasmPolicy {
     /// Per-package policy overrides.
     #[serde(default)]
     pub packages: BTreeMap<String, PackagePolicy>,
+
+    /// Collected complaints for this policy.
+    #[serde(skip)]
+    #[cfg(feature = "std")]
+    pub complaints: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// The default access mode when no explicit rule matches.
@@ -50,6 +59,15 @@ pub struct WasmPolicy {
 pub enum DefaultMode {
     Allow,
     Deny,
+}
+
+/// The behaviour when a component does something not allowed by policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BehaviourOverwrite {
+    #[default]
+    None,
+    Complain,
 }
 
 /// Policy for a specific package (e.g. `wasi:io`).
@@ -123,13 +141,13 @@ pub struct FunctionPolicy {
 ///   s32: [10, 20, 30]
 /// ```
 #[derive(Debug, Clone)]
-pub struct ArgumentConstraint {
-    /// Whether the values field specifies allowed values (`true`) or blocked values (`false`).
-    pub allow: bool,
-
-    /// Typed constraint values. The variant determines the expected
-    /// [`InterfaceType`] for this argument position.
-    pub values: ConstraintValues,
+pub enum ArgumentConstraint {
+    /// An allow-list of constraint values. The argument must match one of these values.
+    AllowList(ConstraintValues),
+    /// A block-list of constraint values. The argument must not match any of these values.
+    BlockList(ConstraintValues),
+    /// No constraint is applied to this argument.
+    NoConstraint,
 }
 
 /// Typed constraint values that directly correspond to WIT primitive types.
@@ -226,37 +244,38 @@ impl ConstraintValues {
 
 impl ArgumentConstraint {
     /// Check whether `val` satisfies this constraint.
-    ///
-    /// * **allow-list** (`allow: true`): the value must appear in the list.
-    /// * **deny-list** (`allow: false`): the value must *not* appear in the list.
     pub fn check_val(&self, val: &Val) -> bool {
-        let found = self.values.contains_val(val);
-        if self.allow {
-            found
-        } else {
-            !found
+        match self {
+            ArgumentConstraint::AllowList(values) => values.contains_val(val),
+            ArgumentConstraint::BlockList(values) => !values.contains_val(val),
+            ArgumentConstraint::NoConstraint => true,
         }
     }
 }
 
-
 /// All valid fields in an argument constraint map.
 const CONSTRAINT_FIELDS: &[&str] = &[
-    "allow", "bool", "s8", "s16", "s32", "s64", "u8", "u16", "u32", "u64", "f32", "f64", "char",
+    "mode", "bool", "s8", "s16", "s32", "s64", "u8", "u16", "u32", "u64", "f32", "f64", "char",
     "string",
 ];
 
-fn double_values_check<'de, M, T, R>(values: &Option<R>, f: fn(T) -> R, map: &mut M) -> Result<Option<R>, M::Error>
+fn values_check<'de, M, T, R>(
+    values: &mut Option<R>,
+    f: fn(T) -> R,
+    map: &mut M,
+) -> Result<(), M::Error>
 where
     M: MapAccess<'de>,
     T: Deserialize<'de>,
 {
     if values.is_some() {
-        return Err(de::Error::custom("multiple type keys found; expected exactly one"));
+        return Err(de::Error::custom(
+            "multiple type keys found; expected exactly one",
+        ));
     }
-    Ok(Some(f(map.next_value()?)))
+    *values = Some(f(map.next_value()?));
+    Ok(())
 }
-
 
 impl<'de> Deserialize<'de> for ArgumentConstraint {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -269,53 +288,74 @@ impl<'de> Deserialize<'de> for ArgumentConstraint {
             type Value = ArgumentConstraint;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                write!(f, "a map with 'allow' and exactly one type key ({})", CONSTRAINT_FIELDS[1..].join(", "))
+                write!(
+                    f,
+                    "a map with 'mode' and optionally one type key ({})",
+                    CONSTRAINT_FIELDS[1..].join(", ")
+                )
             }
 
             fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
             where
                 M: MapAccess<'de>,
             {
-                let mut allow: Option<bool> = None;
+                let mut mode: Option<String> = None;
                 let mut values: Option<ConstraintValues> = None;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "allow" => {
-                            if allow.is_some() {
-                                return Err(de::Error::duplicate_field("allow"));
+                        "mode" => {
+                            if mode.is_some() {
+                                return Err(de::Error::duplicate_field("mode"));
                             }
-                            allow = Some(map.next_value()?);
+                            mode = Some(map.next_value()?);
                         }
-                        "bool" => values = double_values_check(&values, ConstraintValues::Bool, &mut map)?,
-                        "s8" => values = double_values_check(&values, ConstraintValues::S8, &mut map)?,
-                        "s16" => values = double_values_check(&values, ConstraintValues::S16, &mut map)?,
-                        "s32" => values = double_values_check(&values, ConstraintValues::S32, &mut map)?,
-                        "s64" => values = double_values_check(&values, ConstraintValues::S64, &mut map)?,
-                        "u8" => values = double_values_check(&values, ConstraintValues::U8, &mut map)?,
-                        "u16" => values = double_values_check(&values, ConstraintValues::U16, &mut map)?,
-                        "u32" => values = double_values_check(&values, ConstraintValues::U32, &mut map)?,
-                        "u64" => values = double_values_check(&values, ConstraintValues::U64, &mut map)?,
-                        "f32" => values = double_values_check(&values, ConstraintValues::Float32, &mut map)?,
-                        "f64" => values = double_values_check(&values, ConstraintValues::Float64, &mut map)?,
-                        "char" => values = double_values_check(&values, ConstraintValues::Char, &mut map)?,
-                        "string" => values = double_values_check(&values, ConstraintValues::String, &mut map)?,
+                        "bool" => values_check(&mut values, ConstraintValues::Bool, &mut map)?,
+                        "s8" => values_check(&mut values, ConstraintValues::S8, &mut map)?,
+                        "s16" => values_check(&mut values, ConstraintValues::S16, &mut map)?,
+                        "s32" => values_check(&mut values, ConstraintValues::S32, &mut map)?,
+                        "s64" => values_check(&mut values, ConstraintValues::S64, &mut map)?,
+                        "u8" => values_check(&mut values, ConstraintValues::U8, &mut map)?,
+                        "u16" => values_check(&mut values, ConstraintValues::U16, &mut map)?,
+                        "u32" => values_check(&mut values, ConstraintValues::U32, &mut map)?,
+                        "u64" => values_check(&mut values, ConstraintValues::U64, &mut map)?,
+                        "f32" => values_check(&mut values, ConstraintValues::Float32, &mut map)?,
+                        "f64" => values_check(&mut values, ConstraintValues::Float64, &mut map)?,
+                        "char" => values_check(&mut values, ConstraintValues::Char, &mut map)?,
+                        "string" => values_check(&mut values, ConstraintValues::String, &mut map)?,
                         other => {
                             return Err(de::Error::unknown_field(other, CONSTRAINT_FIELDS));
                         }
                     }
                 }
 
-                let allow =
-                    allow.ok_or_else(|| de::Error::missing_field("allow"))?;
-                let values = values.ok_or_else(|| {
-                    de::Error::custom(format!(
-                        "missing type key; expected exactly one of: {}",
-                        CONSTRAINT_FIELDS[1..].join(", ")
-                    ))
-                })?;
-
-                Ok(ArgumentConstraint { allow, values })
+                let mode = mode.ok_or_else(|| de::Error::missing_field("mode"))?;
+                match mode.as_str() {
+                    "allow-list" | "block-list" => {
+                        let values = values.ok_or_else(|| {
+                            de::Error::custom(format!(
+                                "missing type key for {mode}; expected exactly one of: {}",
+                                CONSTRAINT_FIELDS[1..].join(", ")
+                            ))
+                        })?;
+                        if mode == "allow-list" {
+                            Ok(ArgumentConstraint::AllowList(values))
+                        } else {
+                            Ok(ArgumentConstraint::BlockList(values))
+                        }
+                    }
+                    "no-constraint" => {
+                        if values.is_some() {
+                            return Err(de::Error::custom(
+                                "no-constraint mode does not take a type key",
+                            ));
+                        }
+                        Ok(ArgumentConstraint::NoConstraint)
+                    }
+                    _ => Err(de::Error::custom(
+                        "invalid mode; expected allow-list, block-list, or no-constraint",
+                    )),
+                }
             }
         }
 
@@ -340,7 +380,7 @@ impl WasmPolicy {
         interface: &str,
         resource: Option<&str>,
         function_name: &str,
-    ) -> (bool,Vec<ArgumentConstraint>) {
+    ) -> (bool, Vec<ArgumentConstraint>) {
         let default_allowed = match self.default_mode {
             DefaultMode::Allow => true,
             DefaultMode::Deny => false,
@@ -366,9 +406,9 @@ impl WasmPolicy {
                     return (func.allow, func.arguments.clone());
                 }
                 return (resource.allow.unwrap_or(iface_allowed), Vec::new());
-
             }
-        } else if let Some(func) = iface.functions.get(function_name) { // Check freestanding functions in the interface
+        } else if let Some(func) = iface.functions.get(function_name) {
+            // Check freestanding functions in the interface
             return (func.allow, func.arguments.clone());
         }
 
@@ -379,8 +419,11 @@ impl WasmPolicy {
     /// this is needed to avoid having to check for the presence of a policy everywhere in the code
     pub fn new_no_file() -> Self {
         WasmPolicy {
+            behaviour_overwrite: BehaviourOverwrite::default(),
             default_mode: DefaultMode::Allow,
             packages: BTreeMap::new(),
+            #[cfg(feature = "std")]
+            complaints: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 }

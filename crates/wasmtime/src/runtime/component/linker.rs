@@ -116,13 +116,13 @@ pub(crate) enum Definition {
 impl<T: 'static> Linker<T> {
     /// Creates a new linker for the [`Engine`] specified with no items defined
     /// within it. But takes an [`WasmPolicy`] to use for host function policy decisions.
-    pub fn new_with_policy(engine: &Engine, wasm_policy: WasmPolicy) -> Linker<T> {
+    pub fn new_with_policy(engine: &Engine, wasm_policy: Arc<WasmPolicy>) -> Linker<T> {
         Linker {
             engine: engine.clone(),
             strings: Strings::default(),
             map: NameMap::default(),
             allow_shadowing: false,
-            wasm_policy: Arc::new(wasm_policy),
+            wasm_policy: wasm_policy,
             path: Vec::new(),
             _marker: marker::PhantomData,
         }
@@ -450,7 +450,10 @@ impl<T: 'static> LinkerInstance<'_, T> {
         Return: ComponentNamedList + Lower + 'static,
     {
         let metadata = self.provide_host_func_metadata(name);
-        self.insert(name, Definition::Func(HostFunc::from_closure(func, metadata)))?;
+        self.insert(
+            name,
+            Definition::Func(HostFunc::from_closure(func, metadata)),
+        )?;
         Ok(())
     }
 
@@ -465,14 +468,17 @@ impl<T: 'static> LinkerInstance<'_, T> {
         if let Some((package, interface)) = full_path.split_once('/') {
             let resource: Option<&str>;
             let fname: &str;
-            if let Some((l, r)) = name.split_once(".") { // if function belongs to a resource
+            if let Some((l, r)) = name.split_once(".") {
+                // if function belongs to a resource
                 resource = Some(l.trim_start_matches("[method]"));
                 fname = r;
             } else {
                 resource = None;
                 fname = name;
             }
-            let (allowed_to_use, arguments) = self.wasm_policy.is_allowed(package, interface, resource, fname);
+            let (allowed_to_use, arguments) = self
+                .wasm_policy
+                .is_allowed(package, interface, resource, fname);
             HostFuncMetadata {
                 allowed_to_use: allowed_to_use,
                 name: fname.to_string(),
@@ -480,10 +486,13 @@ impl<T: 'static> LinkerInstance<'_, T> {
                 interface: interface.to_string(),
                 package: package.to_string(),
                 arguments: arguments,
+                wasm_policy: self.wasm_policy.clone(),
+                types_checked: false.into(),
             }
-        }
-        else {
-            panic!("full_path `{full_path}` does not contain a `/` character, which is required to separate the package and interface name");
+        } else {
+            panic!(
+                "full_path `{full_path}` does not contain a `/` character, which is required to separate the package and interface name"
+            );
         }
     }
 
@@ -614,7 +623,10 @@ impl<T: 'static> LinkerInstance<'_, T> {
             "cannot use `func_wrap_concurrent` without enabling async support in the config"
         );
         let metadata = self.provide_host_func_metadata(name);
-        self.insert(name, Definition::Func(HostFunc::from_concurrent(f, metadata)))?;
+        self.insert(
+            name,
+            Definition::Func(HostFunc::from_concurrent(f, metadata)),
+        )?;
         Ok(())
     }
 
@@ -723,7 +735,10 @@ impl<T: 'static> LinkerInstance<'_, T> {
         func: impl Fn(StoreContextMut<'_, T>, &[Val], &mut [Val]) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
         let metadata = self.provide_host_func_metadata(name);
-        self.insert(name, Definition::Func(HostFunc::new_dynamic(func, metadata)))?;
+        self.insert(
+            name,
+            Definition::Func(HostFunc::new_dynamic(func, metadata)),
+        )?;
         Ok(())
     }
 
@@ -780,7 +795,10 @@ impl<T: 'static> LinkerInstance<'_, T> {
             "cannot use `func_wrap_concurrent` without enabling async support in the config"
         );
         let metadata = self.provide_host_func_metadata(name);
-        self.insert(name, Definition::Func(HostFunc::new_dynamic_concurrent(f, metadata)))?;
+        self.insert(
+            name,
+            Definition::Func(HostFunc::new_dynamic_concurrent(f, metadata)),
+        )?;
         Ok(())
     }
 

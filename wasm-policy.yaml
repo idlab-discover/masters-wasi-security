@@ -2,6 +2,12 @@
 # default-mode: [allow, deny]
 default-mode: allow
 
+# behaviour-overwrite: defines if something else needs to happen when blocked / allowed (handy for debugging)
+# behaviour-overwrite: [none(default), complain, create]
+# complain: (writes to stdout after program execution) which function calls would've been blocked, without stopping execution.
+# create: creates a policy file based on execution which would only the function being called for. ignores all policies.
+behaviour-overwrite: complain 
+
 packages:
   wasi:io:
     interfaces: 
@@ -18,19 +24,16 @@ packages:
                 allow: true
                 # Each argument constraint uses the WIT type name as the key,
                 # with the list of values to allow or block.
-                # The "allow" field controls whether the listed values are
-                # allowed (true) or blocked (false).
-                # When a value is passed that is NOT in the values list,
-                # the opposite of "allow" applies.
+                # The "mode" field controls how the constraints are enforced
+                # (allow-list, block-list, or no-constraint).
                 arguments:
-                  - allow: false
+                  - mode: block-list
                     bool: [true]        # arg 0: bool, block value 'true'
-                  - allow: true
+                  - mode: allow-list
                     s32: [10, 20, 30]   # arg 1: s32, only allow 10/20/30
-                  - allow: true
+                  - mode: allow-list
                     string: ["hello", "world"]  # arg 2: string, only allow these
-                  - allow: false
-                    s32: []             # arg 3: s32, no values blocked → all allowed
+                  - mode: no-constraint # arg 3: no values checked → all allowed
                   # if there are more arguments in the function signature
                   # than in this list, all extra arguments are unconstrained
 
@@ -65,5 +68,5 @@ packages:
               set-keep-alive-enabled:
                 allow: true
                 arguments:
-                  - allow: false
-                    bool: [false]   # arg 0: bool, block value 'true'
+                  - mode: block-list
+                    bool: [true]   # arg 0: bool, block value 'false'

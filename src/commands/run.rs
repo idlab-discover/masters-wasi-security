@@ -128,35 +128,44 @@ impl RunCommand {
         }
 
         // If a wasm policy file was specified, parse it and pass it to the linker.
-        let wasm_policy;
-        if let Some(policy_path) = &self.wasm_policy {
-            #[cfg(feature = "component-model")]
-            {
-                let policy_contents = std::fs::read_to_string(policy_path)
-                    .with_context(|| format!("failed to read wasm policy file `{}`", policy_path.display()))?;
-                wasm_policy = serde_yaml::from_str(&policy_contents)
-                    .with_context(|| format!("failed to parse wasm policy file `{}`", policy_path.display()))?;
-                match &main {
-                    RunTarget::Component(_) => {}, 
-                    _ => {
-                        bail!("--wasm-policy is only supported with components");
+        let wasm_policy = Arc::new(match &self.wasm_policy {
+            Some(policy_path) => {
+                #[cfg(feature = "component-model")]
+                {
+                    match &main {
+                        RunTarget::Component(_) => {}
+                        _ => {
+                            bail!("--wasm-policy is only supported with components");
+                        }
                     }
+                    let policy_contents =
+                        std::fs::read_to_string(policy_path).with_context(|| {
+                            format!(
+                                "failed to read wasm policy file `{}`",
+                                policy_path.display()
+                            )
+                        })?;
+                    serde_yaml::from_str(&policy_contents).with_context(|| {
+                        format!(
+                            "failed to parse wasm policy file `{}`",
+                            policy_path.display()
+                        )
+                    })?
+                }
+                #[cfg(not(feature = "component-model"))]
+                {
+                    bail!("--wasm-policy requires the component-model feature");
                 }
             }
-            #[cfg(not(feature = "component-model"))]
-            {
-                bail!("--wasm-policy requires the component-model feature");
-            }
-        } else {
-            wasm_policy = wasmtime::component::WasmPolicy::new_no_file();
-        }
+            None => wasmtime::component::WasmPolicy::new_no_file(),
+        });
 
         let mut linker = match &main {
             RunTarget::Core(_) => CliLinker::Core(wasmtime::Linker::new(&engine)),
             #[cfg(feature = "component-model")]
-            RunTarget::Component(_) => {
-                CliLinker::Component(wasmtime::component::Linker::new_with_policy(&engine, wasm_policy))
-            }
+            RunTarget::Component(_) => CliLinker::Component(
+                wasmtime::component::Linker::new_with_policy(&engine, wasm_policy.clone()),
+            ),
         };
         if let Some(enable) = self.run.common.wasm.unknown_exports_allow {
             match &mut linker {
@@ -292,6 +301,13 @@ impl RunCommand {
                     }
                 }
                 return Err(e);
+            }
+        }
+
+        #[cfg(feature = "component-model")]
+        if let Ok(complaints) = wasm_policy.complaints.lock() {
+            for complaint in complaints.iter() {
+                println!("{complaint}");
             }
         }
 
