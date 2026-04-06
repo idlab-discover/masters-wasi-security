@@ -3,8 +3,7 @@ use crate::component::concurrent::{Accessor, Status};
 use crate::component::func::{LiftContext, LowerContext, Options};
 use crate::component::matching::InstanceType;
 use crate::component::storage::slice_to_storage_mut;
-use crate::component::wasm_policy::ArgumentConstraint;
-use crate::component::{ComponentNamedList, ComponentType, Instance, Lift, Lower, Val, WasmPolicy};
+use crate::component::{ComponentNamedList, ComponentType, Instance, Lift, Lower, Val};
 use crate::prelude::*;
 use crate::runtime::vm::component::{
     ComponentInstance, VMComponentContext, VMLowering, VMLoweringCallee,
@@ -17,7 +16,7 @@ use core::future::Future;
 use core::mem::{self, MaybeUninit};
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::AtomicBool;
+use serde::{Deserialize, Serialize};
 use wasmtime_environ::component::{
     CanonicalAbiInfo, ComponentTypes, InterfaceType, MAX_FLAT_ASYNC_PARAMS, MAX_FLAT_PARAMS,
     MAX_FLAT_RESULTS, OptionsIndex, TypeFuncIndex, TypeTuple,
@@ -29,30 +28,21 @@ pub struct HostFunc {
     func: Box<dyn Any + Send + Sync>,
 }
 
-// #[derive(Debug)]
+#[derive(Serialize, Debug)]
 pub struct HostFuncMetadata {
-    pub allowed_to_use: bool,
+    #[serde(rename = "fn")]
     pub name: String,
+    #[serde(rename = "res", skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    #[serde(rename = "intf")]
     pub interface: String,
+    #[serde(rename = "pkg")]
     pub package: String,
-    pub arguments: Vec<ArgumentConstraint>,
-    pub wasm_policy: Arc<WasmPolicy>,
-    pub types_checked: AtomicBool,
 }
 
-impl std::fmt::Debug for HostFuncMetadata {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("HostFuncMetadata")
-            .field("allowed_to_use", &self.allowed_to_use)
-            .field("name", &self.name)
-            .field("resource", &self.resource)
-            .field("interface", &self.interface)
-            .field("package", &self.package)
-            .field("arguments", &self.arguments)
-            .field("types_checked", &self.types_checked)
-            .finish()
-    }
+#[derive(Deserialize, Debug)]
+struct OpaResponse {
+    result: bool,
 }
 
 struct HostFuncWithMetadata<F> {
@@ -142,22 +132,16 @@ impl HostFunc {
         let host_data = unsafe { data.as_ref() };
 
         unsafe {
-            call_host_and_handle_result::<T>(
-                cx,
-                &host_data.metadata,
-                TypeFuncIndex::from_u32(ty),
-                |store, instance| {
-                    call_host(
-                        store,
-                        instance,
-                        &host_data.metadata,
-                        TypeFuncIndex::from_u32(ty),
-                        OptionsIndex::from_u32(options),
-                        NonNull::slice_from_raw_parts(storage, storage_len).as_mut(),
-                        move |store, instance, args| (host_data.func)(store, instance, args),
-                    )
-                },
-            )
+            call_host_and_handle_result::<T>(cx, &host_data.metadata, |store, instance| {
+                call_host(
+                    store,
+                    instance,
+                    TypeFuncIndex::from_u32(ty),
+                    OptionsIndex::from_u32(options),
+                    NonNull::slice_from_raw_parts(storage, storage_len).as_mut(),
+                    move |store, instance, args| (host_data.func)(store, instance, args),
+                )
+            })
         }
     }
 
@@ -276,7 +260,6 @@ where
 unsafe fn call_host<T, Params, Return, F>(
     mut store: StoreContextMut<'_, T>,
     instance: Instance,
-    metadata: &HostFuncMetadata,
     ty: TypeFuncIndex,
     options_idx: OptionsIndex,
     storage: &mut [MaybeUninit<ValRaw>],
@@ -309,16 +292,6 @@ where
     if async_ {
         #[cfg(feature = "component-model-async")]
         {
-            check_argument_constraints(
-                metadata,
-                &types,
-                ty,
-                &options,
-                storage,
-                &store,
-                MAX_FLAT_ASYNC_PARAMS,
-            )?;
-
             let mut storage = unsafe { Storage::<'_, Params, u32>::new_async::<Return>(storage) };
 
             // Lift the parameters, either from flat storage or from linear
@@ -393,16 +366,6 @@ where
             );
         }
     } else {
-        check_argument_constraints(
-            metadata,
-            &types,
-            ty,
-            &options,
-            storage,
-            &store,
-            MAX_FLAT_PARAMS,
-        )?;
-
         let mut storage = unsafe { Storage::<'_, Params, Return>::new_sync(storage) };
         let mut lift = LiftContext::new(store.0.store_opaque_mut(), &options, instance);
         lift.enter_call();
@@ -742,268 +705,36 @@ pub(crate) fn validate_inbounds<T: ComponentType>(memory: &[u8], ptr: &ValRaw) -
     Ok(ptr)
 }
 
-/// returns `true` if a constraint was checked, `false` if there was no constraint to check
-/// does some needed checks and checks if the value satisfies the constraint
-fn check_arg_constraint(
-    idx: usize,
-    offset: usize,
-    metadata: &HostFuncMetadata,
-    val: Option<&Val>,
-) -> Result<bool, anyhow::Error> {
-    if let Some(constraint) = metadata.arguments.get(idx - offset) {
-        if let Some(val) = val {
-            // if none -> argument not a primitive type
-            if !constraint.check_val(val) {
-                let msg = format!(
-                    "Argument {} of `{}/{}:{}{}` violates policy constraint: value {:?} does not satisfy constraint {:?}",
-                    idx - offset,
-                    metadata.package,
-                    metadata.interface,
-                    metadata
-                        .resource
-                        .as_ref()
-                        .map(|r| format!("{r}#"))
-                        .unwrap_or_default(),
-                    metadata.name,
-                    val,
-                    constraint
-                );
-                if metadata.wasm_policy.behaviour_overwrite
-                    == crate::component::wasm_policy::BehaviourOverwrite::Complain
-                {
-                    #[cfg(feature = "std")]
-                    if let Ok(mut complaints) = metadata.wasm_policy.complaints.lock() {
-                        complaints.push(msg);
-                    }
-                } else {
-                    bail!("{msg}");
-                }
-            }
-        }
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-/// Check argument constraints against actual parameter values before invoking
-/// the host closure. Only primitive types are inspected, so resource-table
-/// state is never touched and the typed lift that follows stays valid.
-///
-/// `max_flat_params` controls the flattening threshold: use [`MAX_FLAT_PARAMS`]
-/// for synchronous calls and [`MAX_FLAT_ASYNC_PARAMS`] for asynchronous ones.
-fn check_argument_constraints<T>(
-    metadata: &HostFuncMetadata,
-    types: &ComponentTypes,
-    ty: &wasmtime_environ::component::TypeFunc,
-    options: &Options,
-    storage: &[MaybeUninit<ValRaw>],
-    store: &StoreContextMut<'_, T>,
-    max_flat_params: usize,
-) -> Result<()> {
-    if metadata.arguments.is_empty() {
-        return Ok(());
-    }
-
-    let param_type_tuple = &types[ty.params];
-    let offset = metadata.resource.as_ref().map_or(0, |_| 1);
-
-    if let Some(param_count) = param_type_tuple.abi.flat_count(max_flat_params) {
-        let flat_storage =
-            unsafe { mem::transmute::<&[MaybeUninit<ValRaw>], &[ValRaw]>(&storage[..param_count]) };
-        // Memory is only needed for string constraints; use an empty slice
-        // as a fallback when the component has no linear memory.
-        let memory = if options.has_memory() {
-            options.memory(store.0.store_opaque())
-        } else {
-            &[]
-        };
-        let mut flat_idx: usize = 0;
-
-        for (param_idx, param_ty) in param_type_tuple.types.iter().enumerate().skip(offset) {
-            let flat_count = types
-                .canonical_abi(param_ty)
-                .flat_count(max_flat_params)
-                .unwrap_or(1);
-
-            let val = lift_primitive_from_flat(*param_ty, &flat_storage[flat_idx..], memory);
-            if !check_arg_constraint(param_idx, offset, metadata, val.as_ref())? {
-                break; // no more constraints to check
-            }
-            flat_idx += flat_count;
-        }
-    } else {
-        // Indirect representation: params are stored in linear memory.
-        let memory = options.memory(store.0.store_opaque());
-        let ptr_val = unsafe { storage[0].assume_init_ref() };
-        let mut mem_ptr = validate_inbounds_dynamic(&param_type_tuple.abi, memory, ptr_val)?;
-
-        for (param_idx, param_ty) in param_type_tuple.types.iter().enumerate().skip(offset) {
-            let abi = types.canonical_abi(param_ty);
-            let size = usize::try_from(abi.size32).unwrap();
-            let field_offset = abi.next_field32_size(&mut mem_ptr);
-
-            let val =
-                lift_primitive_from_memory(*param_ty, &memory[field_offset..][..size], memory);
-            if !check_arg_constraint(param_idx, offset, metadata, val.as_ref())? {
-                break; // no more constraints to check
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Lift a primitive [`Val`] directly from flat (stack) representation.
-///
-/// Only handles the types supported by [`ConstraintValues`]: booleans,
-/// integers, floats, chars, and strings.  Returns `None` for resource
-/// or compound types so the caller can simply skip them.
-fn lift_primitive_from_flat(ty: InterfaceType, src: &[ValRaw], memory: &[u8]) -> Option<Val> {
-    Some(match ty {
-        InterfaceType::Bool => Val::Bool(src[0].get_i32() != 0),
-        InterfaceType::S8 => Val::S8(src[0].get_i32() as i8),
-        InterfaceType::U8 => Val::U8(src[0].get_i32() as u8),
-        InterfaceType::S16 => Val::S16(src[0].get_i32() as i16),
-        InterfaceType::U16 => Val::U16(src[0].get_i32() as u16),
-        InterfaceType::S32 => Val::S32(src[0].get_i32()),
-        InterfaceType::U32 => Val::U32(src[0].get_u32()),
-        InterfaceType::S64 => Val::S64(src[0].get_i64()),
-        InterfaceType::U64 => Val::U64(src[0].get_u64()),
-        InterfaceType::Float32 => Val::Float32(f32::from_bits(src[0].get_f32())),
-        InterfaceType::Float64 => Val::Float64(f64::from_bits(src[0].get_f64())),
-        InterfaceType::Char => Val::Char(char::from_u32(src[0].get_u32())?),
-        InterfaceType::String => {
-            let ptr = src[0].get_u32() as usize;
-            let len = src[1].get_u32() as usize;
-            let end = ptr.checked_add(len)?;
-            if end > memory.len() {
-                return None;
-            }
-            Val::String(core::str::from_utf8(&memory[ptr..end]).ok()?.into())
-        }
-        _ => return None,
-    })
-}
-
-/// Lift a primitive [`Val`] from its canonical-ABI memory encoding.
-///
-/// Like [`lift_primitive_from_flat`] but reads from a byte slice in linear
-/// memory rather than from flat `ValRaw` slots.
-fn lift_primitive_from_memory(ty: InterfaceType, bytes: &[u8], memory: &[u8]) -> Option<Val> {
-    Some(match ty {
-        InterfaceType::Bool => Val::Bool(bytes[0] != 0),
-        InterfaceType::S8 => Val::S8(bytes[0] as i8),
-        InterfaceType::U8 => Val::U8(bytes[0]),
-        InterfaceType::S16 => Val::S16(i16::from_le_bytes(bytes[..2].try_into().ok()?)),
-        InterfaceType::U16 => Val::U16(u16::from_le_bytes(bytes[..2].try_into().ok()?)),
-        InterfaceType::S32 => Val::S32(i32::from_le_bytes(bytes[..4].try_into().ok()?)),
-        InterfaceType::U32 => Val::U32(u32::from_le_bytes(bytes[..4].try_into().ok()?)),
-        InterfaceType::S64 => Val::S64(i64::from_le_bytes(bytes[..8].try_into().ok()?)),
-        InterfaceType::U64 => Val::U64(u64::from_le_bytes(bytes[..8].try_into().ok()?)),
-        InterfaceType::Float32 => Val::Float32(f32::from_le_bytes(bytes[..4].try_into().ok()?)),
-        InterfaceType::Float64 => Val::Float64(f64::from_le_bytes(bytes[..8].try_into().ok()?)),
-        InterfaceType::Char => Val::Char(char::from_u32(u32::from_le_bytes(
-            bytes[..4].try_into().ok()?,
-        ))?),
-        InterfaceType::String => {
-            let ptr = u32::from_le_bytes(bytes[..4].try_into().ok()?) as usize;
-            let len = u32::from_le_bytes(bytes[4..8].try_into().ok()?) as usize;
-            let end = ptr.checked_add(len)?;
-            if end > memory.len() {
-                return None;
-            }
-            Val::String(core::str::from_utf8(&memory[ptr..end]).ok()?.into())
-        }
-        _ => return None,
-    })
-}
-
 unsafe fn call_host_and_handle_result<T>(
     cx: NonNull<VMOpaqueContext>,
     metadata: &HostFuncMetadata,
-    ty: TypeFuncIndex,
     func: impl FnOnce(StoreContextMut<'_, T>, Instance) -> Result<()>,
 ) -> bool
 where
     T: 'static,
 {
     let cx = unsafe { VMComponentContext::from_opaque(cx) };
+
+    let body = format!(
+        "{{\"input\": {}}}",
+        serde_json::to_string(metadata).unwrap() // TODO: handle unwrap cleanly
+    );
+    println!("{body}",); // TODO: remove print when done testing/debugging
+
+    let response = ureq::post("http://localhost:8181/v1/data/component/host_function/allow")
+        .set("Content-Type", "application/json")
+        .send_string(&body)
+        .expect("Failed to query OPA")
+        .into_json::<OpaResponse>()
+        .expect("Failed to parse OPA response");
+    if !response.result {
+        // TODO: clean up the crash that occurs when false is returned (exit cleanly)
+        return false;
+    }
+
     unsafe {
         ComponentInstance::enter_host_from_wasm(cx, |store, instance| {
-            println!("Calling host function `{:?}`", metadata);
-            if !metadata.allowed_to_use {
-                let msg = format!(
-                    "Host function `{}/{}:{}{}` is not allowed to be used",
-                    metadata.package,
-                    metadata.interface,
-                    metadata
-                        .resource
-                        .as_ref()
-                        .map(|r| format!("{r}#"))
-                        .unwrap_or_default(),
-                    metadata.name
-                );
-                if metadata.wasm_policy.behaviour_overwrite
-                    == crate::component::wasm_policy::BehaviourOverwrite::Complain
-                {
-                    #[cfg(feature = "std")]
-                    if let Ok(mut complaints) = metadata.wasm_policy.complaints.lock() {
-                        complaints.push(msg);
-                    }
-                } else {
-                    bail!("{msg}");
-                }
-            }
             let mut store = store.unchecked_context_mut();
-
-            #[cfg(feature = "std")]
-            let types_already_checked = metadata
-                .types_checked
-                .load(core::sync::atomic::Ordering::Relaxed);
-            #[cfg(not(feature = "std"))]
-            let types_already_checked = false;
-
-            if !types_already_checked {
-                let types = instance.id().get(store.0).component().types().clone();
-                let ty = &types[ty];
-                let param_tys = &types[ty.params].types;
-                let offset = metadata.resource.as_ref().map_or(0, |_| 1);
-                let mut type_check_success = true;
-                for (i, constraint) in metadata.arguments.iter().enumerate() {
-                    if let Some(f_arg_ty) = param_tys.get(i + offset) {
-                        match constraint {
-                            ArgumentConstraint::AllowList(v) | ArgumentConstraint::BlockList(v) => {
-                                if !v.matches_interface_type(*f_arg_ty) {
-                                    println!(
-                                        "Type mismatch for argument {}: policy expects {:?} but function parameter is {:?}",
-                                        i,
-                                        v.interface_type(),
-                                        f_arg_ty
-                                    );
-                                    type_check_success = false;
-                                }
-                            }
-                            ArgumentConstraint::NoConstraint => {}
-                        };
-                    } else {
-                        println!(
-                            "Function has {} argument constraint(s), but function only has {} parameters",
-                            metadata.arguments.len(),
-                            param_tys.len()
-                        );
-                        type_check_success = false;
-                        break;
-                    }
-                }
-                #[cfg(feature = "std")]
-                if type_check_success {
-                    metadata
-                        .types_checked
-                        .store(true, core::sync::atomic::Ordering::Relaxed);
-                }
-            }
-
             store.0.call_hook(CallHook::CallingHost)?;
             let res = func(store.as_context_mut(), instance);
             store.0.call_hook(CallHook::ReturningFromHost)?;
@@ -1015,7 +746,6 @@ where
 unsafe fn call_host_dynamic<T, F>(
     mut store: StoreContextMut<'_, T>,
     instance: Instance,
-    metadata: &HostFuncMetadata,
     ty: TypeFuncIndex,
     options_idx: OptionsIndex,
     storage: &mut [MaybeUninit<ValRaw>],
@@ -1074,20 +804,6 @@ where
     let result_start = params_and_results.len();
     for _ in 0..result_tys.types.len() {
         params_and_results.push(Val::Bool(false));
-    }
-
-    // Check argument constraints against the already-lifted parameter values.
-    if !metadata.arguments.is_empty() {
-        let offset = metadata.resource.as_ref().map_or(0, |_| 1);
-        for (param_idx, val) in params_and_results[..result_start]
-            .iter()
-            .enumerate()
-            .skip(offset)
-        {
-            if !check_arg_constraint(param_idx, offset, metadata, Some(val))? {
-                break; // no more constraints to check
-            }
-        }
     }
 
     if async_ {
@@ -1277,23 +993,17 @@ where
     let host_data = unsafe { data.as_ref() };
 
     unsafe {
-        call_host_and_handle_result(
-            cx,
-            &host_data.metadata,
-            TypeFuncIndex::from_u32(ty),
-            |store, instance| {
-                call_host_dynamic::<T, _>(
-                    store,
-                    instance,
-                    &host_data.metadata,
-                    TypeFuncIndex::from_u32(ty),
-                    OptionsIndex::from_u32(options),
-                    NonNull::slice_from_raw_parts(storage, storage_len).as_mut(),
-                    move |store, instance, params, results| {
-                        (host_data.func)(store, instance, params, results)
-                    },
-                )
-            },
-        )
+        call_host_and_handle_result(cx, &host_data.metadata, |store, instance| {
+            call_host_dynamic::<T, _>(
+                store,
+                instance,
+                TypeFuncIndex::from_u32(ty),
+                OptionsIndex::from_u32(options),
+                NonNull::slice_from_raw_parts(storage, storage_len).as_mut(),
+                move |store, instance, params, results| {
+                    (host_data.func)(store, instance, params, results)
+                },
+            )
+        })
     }
 }

@@ -199,11 +199,6 @@ impl Options {
     pub(crate) fn memory_raw(&self) -> Option<NonNull<VMMemoryDefinition>> {
         self.memory
     }
-
-    /// Returns `true` if this set of options has an associated linear memory.
-    pub(crate) fn has_memory(&self) -> bool {
-        self.memory.is_some()
-    }
 }
 
 /// A helper structure which is a "package" of the context used during lowering

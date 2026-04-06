@@ -476,18 +476,11 @@ impl<T: 'static> LinkerInstance<'_, T> {
                 resource = None;
                 fname = name;
             }
-            let (allowed_to_use, arguments) = self
-                .wasm_policy
-                .is_allowed(package, interface, resource, fname);
             HostFuncMetadata {
-                allowed_to_use: allowed_to_use,
                 name: fname.to_string(),
                 resource: resource.map(|r| r.to_string()),
                 interface: interface.to_string(),
                 package: package.to_string(),
-                arguments: arguments,
-                wasm_policy: self.wasm_policy.clone(),
-                types_checked: false.into(),
             }
         } else {
             panic!(

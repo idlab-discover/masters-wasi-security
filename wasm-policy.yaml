@@ -1,6 +1,6 @@
 # default-mode: defines how default values are chosen
 # default-mode: [allow, deny]
-default-mode: allow
+default-mode: deny 
 
 # behaviour-overwrite: defines if something else needs to happen when blocked / allowed (handy for debugging)
 # behaviour-overwrite: [none(default), complain, create]
@@ -61,6 +61,8 @@ packages:
         allow: true
   wasi:sockets:
     interfaces:
+      tcp-create-socket:
+        allow: true
       tcp:
         resources:
           tcp-socket:
