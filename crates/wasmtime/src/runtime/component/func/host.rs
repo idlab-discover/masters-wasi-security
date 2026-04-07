@@ -45,6 +45,175 @@ struct OpaResponse {
     result: bool,
 }
 
+#[derive(Serialize)]
+struct OpaRequest<'a> {
+    input: OpaRequestInput<'a>,
+}
+
+#[derive(Serialize)]
+struct OpaRequestInput<'a> {
+    #[serde(rename = "fn")]
+    name: &'a str,
+    #[serde(rename = "res", skip_serializing_if = "Option::is_none")]
+    resource: Option<&'a str>,
+    #[serde(rename = "intf")]
+    interface: &'a str,
+    #[serde(rename = "pkg")]
+    package: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<Vec<serde_json::Value>>,
+}
+
+/// Convert a `Val` to a `serde_json::Value` for OPA argument checking.
+/// Handles all WIT types recursively. Resource types produce `null`.
+fn val_to_json(val: &Val) -> serde_json::Value {
+    match val {
+        Val::Bool(b) => serde_json::json!(*b),
+        Val::S8(n) => serde_json::json!(*n),
+        Val::U8(n) => serde_json::json!(*n),
+        Val::S16(n) => serde_json::json!(*n),
+        Val::U16(n) => serde_json::json!(*n),
+        Val::S32(n) => serde_json::json!(*n),
+        Val::U32(n) => serde_json::json!(*n),
+        Val::S64(n) => serde_json::json!(*n),
+        Val::U64(n) => serde_json::json!(*n),
+        Val::Float32(n) => serde_json::json!(*n),
+        Val::Float64(n) => serde_json::json!(*n),
+        Val::Char(c) => serde_json::json!(c.to_string()),
+        Val::String(s) => serde_json::json!(s),
+        Val::List(vals) => serde_json::Value::Array(vals.iter().map(val_to_json).collect()),
+        Val::Record(fields) => {
+            let map: serde_json::Map<String, serde_json::Value> = fields
+                .iter()
+                .map(|(k, v)| (k.clone(), val_to_json(v)))
+                .collect();
+            serde_json::Value::Object(map)
+        }
+        Val::Tuple(vals) => serde_json::Value::Array(vals.iter().map(val_to_json).collect()),
+        Val::Variant(name, payload) => {
+            let mut map = serde_json::Map::new();
+            map.insert("variant".to_string(), serde_json::json!(name));
+            if let Some(val) = payload {
+                map.insert("value".to_string(), val_to_json(val));
+            }
+            serde_json::Value::Object(map)
+        }
+        Val::Enum(name) => serde_json::json!(name),
+        Val::Option(opt) => match opt {
+            Some(val) => val_to_json(val),
+            None => serde_json::Value::Null,
+        },
+        Val::Result(res) => match res {
+            Ok(val) => {
+                let mut map = serde_json::Map::new();
+                map.insert(
+                    "ok".to_string(),
+                    val.as_ref()
+                        .map(|v| val_to_json(v))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                serde_json::Value::Object(map)
+            }
+            Err(val) => {
+                let mut map = serde_json::Map::new();
+                map.insert(
+                    "err".to_string(),
+                    val.as_ref()
+                        .map(|v| val_to_json(v))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                serde_json::Value::Object(map)
+            }
+        },
+        Val::Flags(flags) => {
+            serde_json::Value::Array(flags.iter().map(|f| serde_json::json!(f)).collect())
+        }
+        Val::Resource(_) => serde_json::Value::Null,
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// Lift argument values from storage for OPA policy checking.
+/// Uses the same `Val::lift`/`Val::load` mechanism as `dynamic_params_load`,
+/// but skips resource types (Own/Borrow) to avoid modifying resource tables
+/// (which would break the subsequent typed lift).
+unsafe fn lift_args_for_opa(
+    cx: &mut LiftContext<'_>,
+    types: &ComponentTypes,
+    storage: &[MaybeUninit<ValRaw>],
+    param_tys: &TypeTuple,
+    max_flat_params: usize,
+) -> Result<Vec<Val>> {
+    let mut args = Vec::new();
+    if param_tys.types.is_empty() {
+        return Ok(args);
+    }
+
+    if let Some(param_count) = param_tys.abi.flat_count(max_flat_params) {
+        let storage =
+            unsafe { mem::transmute::<&[MaybeUninit<ValRaw>], &[ValRaw]>(&storage[..param_count]) };
+        let mut iter = storage.iter();
+        for ty in param_tys.types.iter() {
+            match ty {
+                InterfaceType::Own(_) | InterfaceType::Borrow(_) => {
+                    // Skip resource params — consume the 1 ValRaw slot but don't lift
+                    let _ = iter.next();
+                    args.push(Val::Bool(false)); // placeholder, will be skipped
+                }
+                _ => {
+                    args.push(Val::lift(cx, *ty, &mut iter)?);
+                }
+            }
+        }
+    } else {
+        // Indirect params: read from linear memory
+        let mut offset = validate_inbounds_dynamic(&param_tys.abi, cx.memory(), unsafe {
+            storage[0].assume_init_ref()
+        })?;
+        for ty in param_tys.types.iter() {
+            let abi = types.canonical_abi(ty);
+            let size = usize::try_from(abi.size32).unwrap();
+            let memory = &cx.memory()[abi.next_field32_size(&mut offset)..][..size];
+            match ty {
+                InterfaceType::Own(_) | InterfaceType::Borrow(_) => {
+                    args.push(Val::Bool(false)); // placeholder
+                }
+                _ => {
+                    args.push(Val::load(cx, *ty, memory)?);
+                }
+            }
+        }
+    }
+    Ok(args)
+}
+
+/// Query the OPA server with function metadata and optional arguments.
+fn query_opa(metadata: &HostFuncMetadata, args: Option<Vec<serde_json::Value>>) -> Result<()> {
+    let request = OpaRequest {
+        input: OpaRequestInput {
+            name: &metadata.name,
+            resource: metadata.resource.as_deref(),
+            interface: &metadata.interface,
+            package: &metadata.package,
+            args,
+        },
+    };
+    let body = serde_json::to_string(&request).unwrap();
+    println!("{body}"); // TODO: remove when done testing/debugging
+
+    let response = ureq::post("http://localhost:8181/v1/data/component/host_function/allow")
+        .set("Content-Type", "application/json")
+        .send_string(&body)
+        .expect("Failed to query OPA")
+        .into_json::<OpaResponse>()
+        .expect("Failed to parse OPA response");
+
+    if !response.result {
+        bail!("OPA policy denied call to '{}'", metadata.name);
+    }
+    Ok(())
+}
+
 struct HostFuncWithMetadata<F> {
     func: F,
     metadata: HostFuncMetadata,
@@ -132,13 +301,14 @@ impl HostFunc {
         let host_data = unsafe { data.as_ref() };
 
         unsafe {
-            call_host_and_handle_result::<T>(cx, &host_data.metadata, |store, instance| {
+            call_host_and_handle_result::<T>(cx, |store, instance| {
                 call_host(
                     store,
                     instance,
                     TypeFuncIndex::from_u32(ty),
                     OptionsIndex::from_u32(options),
                     NonNull::slice_from_raw_parts(storage, storage_len).as_mut(),
+                    &host_data.metadata,
                     move |store, instance, args| (host_data.func)(store, instance, args),
                 )
             })
@@ -263,6 +433,7 @@ unsafe fn call_host<T, Params, Return, F>(
     ty: TypeFuncIndex,
     options_idx: OptionsIndex,
     storage: &mut [MaybeUninit<ValRaw>],
+    metadata: &HostFuncMetadata,
     closure: F,
 ) -> Result<()>
 where
@@ -288,16 +459,32 @@ where
     let ty = &types[ty];
     let param_tys = InterfaceType::Tuple(ty.params);
     let result_tys = InterfaceType::Tuple(ty.results);
+    let param_tuple = &types[ty.params];
 
     if async_ {
         #[cfg(feature = "component-model-async")]
         {
-            let mut storage = unsafe { Storage::<'_, Params, u32>::new_async::<Return>(storage) };
+            let max_flat = MAX_FLAT_ASYNC_PARAMS;
 
-            // Lift the parameters, either from flat storage or from linear
-            // memory.
+            // Lift args for OPA using the same LiftContext (before typed lift)
             let lift = &mut LiftContext::new(store.0.store_opaque_mut(), &options, instance);
             lift.enter_call();
+            let opa_vals =
+                unsafe { lift_args_for_opa(lift, &types, storage, param_tuple, max_flat)? };
+            let skip = if metadata.resource.is_some() { 1 } else { 0 };
+            let opa_args: Vec<serde_json::Value> =
+                opa_vals[skip..].iter().map(val_to_json).collect();
+            query_opa(
+                metadata,
+                if opa_args.is_empty() {
+                    None
+                } else {
+                    Some(opa_args)
+                },
+            )?;
+
+            // Now do the typed lift (same LiftContext, no second enter_call)
+            let mut storage = unsafe { Storage::<'_, Params, u32>::new_async::<Return>(storage) };
             let params = storage.lift_params(lift, param_tys)?;
 
             // Load the return pointer, if present.
@@ -366,10 +553,27 @@ where
             );
         }
     } else {
-        let mut storage = unsafe { Storage::<'_, Params, Return>::new_sync(storage) };
+        let max_flat = MAX_FLAT_PARAMS;
+
+        // Lift args for OPA using the same LiftContext (before typed lift)
         let mut lift = LiftContext::new(store.0.store_opaque_mut(), &options, instance);
         lift.enter_call();
-        let params = storage.lift_params(&mut lift, param_tys)?;
+        let opa_vals =
+            unsafe { lift_args_for_opa(&mut lift, &types, storage, param_tuple, max_flat)? };
+        let skip = if metadata.resource.is_some() { 1 } else { 0 };
+        let opa_args: Vec<serde_json::Value> = opa_vals[skip..].iter().map(val_to_json).collect();
+        query_opa(
+            metadata,
+            if opa_args.is_empty() {
+                None
+            } else {
+                Some(opa_args)
+            },
+        )?;
+
+        // Now do the typed lift (same LiftContext, no second enter_call)
+        let mut typed_storage = unsafe { Storage::<'_, Params, Return>::new_sync(storage) };
+        let params = typed_storage.lift_params(&mut lift, param_tys)?;
 
         let ret = match closure(store.as_context_mut(), instance, params) {
             HostResult::Done(result) => result?,
@@ -383,7 +587,7 @@ where
             flags.set_may_leave(false);
         }
         let mut lower = LowerContext::new(store, &options, &types, instance);
-        storage.lower_results(&mut lower, result_tys, ret)?;
+        typed_storage.lower_results(&mut lower, result_tys, ret)?;
         unsafe {
             flags.set_may_leave(true);
         }
@@ -707,30 +911,12 @@ pub(crate) fn validate_inbounds<T: ComponentType>(memory: &[u8], ptr: &ValRaw) -
 
 unsafe fn call_host_and_handle_result<T>(
     cx: NonNull<VMOpaqueContext>,
-    metadata: &HostFuncMetadata,
     func: impl FnOnce(StoreContextMut<'_, T>, Instance) -> Result<()>,
 ) -> bool
 where
     T: 'static,
 {
     let cx = unsafe { VMComponentContext::from_opaque(cx) };
-
-    let body = format!(
-        "{{\"input\": {}}}",
-        serde_json::to_string(metadata).unwrap() // TODO: handle unwrap cleanly
-    );
-    println!("{body}",); // TODO: remove print when done testing/debugging
-
-    let response = ureq::post("http://localhost:8181/v1/data/component/host_function/allow")
-        .set("Content-Type", "application/json")
-        .send_string(&body)
-        .expect("Failed to query OPA")
-        .into_json::<OpaResponse>()
-        .expect("Failed to parse OPA response");
-    if !response.result {
-        // TODO: clean up the crash that occurs when false is returned (exit cleanly)
-        return false;
-    }
 
     unsafe {
         ComponentInstance::enter_host_from_wasm(cx, |store, instance| {
@@ -749,6 +935,7 @@ unsafe fn call_host_dynamic<T, F>(
     ty: TypeFuncIndex,
     options_idx: OptionsIndex,
     storage: &mut [MaybeUninit<ValRaw>],
+    metadata: &HostFuncMetadata,
     closure: F,
 ) -> Result<()>
 where
@@ -802,6 +989,23 @@ where
         )?
     };
     let result_start = params_and_results.len();
+
+    // OPA policy check with the already-lifted args
+    // For resource methods, skip the first arg (resource handle / self)
+    let args_start = if metadata.resource.is_some() { 1 } else { 0 };
+    let opa_args: Vec<serde_json::Value> = params_and_results[args_start..result_start]
+        .iter()
+        .map(val_to_json)
+        .collect();
+    query_opa(
+        metadata,
+        if opa_args.is_empty() {
+            None
+        } else {
+            Some(opa_args)
+        },
+    )?;
+
     for _ in 0..result_tys.types.len() {
         params_and_results.push(Val::Bool(false));
     }
@@ -993,13 +1197,14 @@ where
     let host_data = unsafe { data.as_ref() };
 
     unsafe {
-        call_host_and_handle_result(cx, &host_data.metadata, |store, instance| {
+        call_host_and_handle_result(cx, |store, instance| {
             call_host_dynamic::<T, _>(
                 store,
                 instance,
                 TypeFuncIndex::from_u32(ty),
                 OptionsIndex::from_u32(options),
                 NonNull::slice_from_raw_parts(storage, storage_len).as_mut(),
+                &host_data.metadata,
                 move |store, instance, params, results| {
                     (host_data.func)(store, instance, params, results)
                 },
