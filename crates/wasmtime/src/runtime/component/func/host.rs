@@ -133,60 +133,6 @@ fn val_to_json(val: &Val) -> serde_json::Value {
     }
 }
 
-/// Lift argument values from storage for OPA policy checking.
-/// Uses the same `Val::lift`/`Val::load` mechanism as `dynamic_params_load`,
-/// but skips resource types (Own/Borrow) to avoid modifying resource tables
-/// (which would break the subsequent typed lift).
-unsafe fn lift_args_for_opa(
-    cx: &mut LiftContext<'_>,
-    types: &ComponentTypes,
-    storage: &[MaybeUninit<ValRaw>],
-    param_tys: &TypeTuple,
-    max_flat_params: usize,
-) -> Result<Vec<Val>> {
-    let mut args = Vec::new();
-    if param_tys.types.is_empty() {
-        return Ok(args);
-    }
-
-    if let Some(param_count) = param_tys.abi.flat_count(max_flat_params) {
-        let storage =
-            unsafe { mem::transmute::<&[MaybeUninit<ValRaw>], &[ValRaw]>(&storage[..param_count]) };
-        let mut iter = storage.iter();
-        for ty in param_tys.types.iter() {
-            match ty {
-                InterfaceType::Own(_) | InterfaceType::Borrow(_) => {
-                    // Skip resource params — consume the 1 ValRaw slot but don't lift
-                    let _ = iter.next();
-                    args.push(Val::Bool(false)); // placeholder, will be skipped
-                }
-                _ => {
-                    args.push(Val::lift(cx, *ty, &mut iter)?);
-                }
-            }
-        }
-    } else {
-        // Indirect params: read from linear memory
-        let mut offset = validate_inbounds_dynamic(&param_tys.abi, cx.memory(), unsafe {
-            storage[0].assume_init_ref()
-        })?;
-        for ty in param_tys.types.iter() {
-            let abi = types.canonical_abi(ty);
-            let size = usize::try_from(abi.size32).unwrap();
-            let memory = &cx.memory()[abi.next_field32_size(&mut offset)..][..size];
-            match ty {
-                InterfaceType::Own(_) | InterfaceType::Borrow(_) => {
-                    args.push(Val::Bool(false)); // placeholder
-                }
-                _ => {
-                    args.push(Val::load(cx, *ty, memory)?);
-                }
-            }
-        }
-    }
-    Ok(args)
-}
-
 /// Query the OPA server with function metadata and optional arguments.
 fn query_opa(metadata: &HostFuncMetadata, args: Option<Vec<serde_json::Value>>) -> Result<()> {
     let request = OpaRequest {
@@ -469,8 +415,18 @@ where
             // Lift args for OPA using the same LiftContext (before typed lift)
             let lift = &mut LiftContext::new(store.0.store_opaque_mut(), &options, instance);
             lift.enter_call();
-            let opa_vals =
-                unsafe { lift_args_for_opa(lift, &types, storage, param_tuple, max_flat)? };
+            let mut opa_vals = Vec::new();
+            unsafe {
+                dynamic_params_load(
+                    lift,
+                    &types,
+                    storage,
+                    param_tuple,
+                    &mut opa_vals,
+                    max_flat,
+                    true,
+                )?
+            };
             let skip = if metadata.resource.is_some() { 1 } else { 0 };
             let opa_args: Vec<serde_json::Value> =
                 opa_vals[skip..].iter().map(val_to_json).collect();
@@ -558,8 +514,18 @@ where
         // Lift args for OPA using the same LiftContext (before typed lift)
         let mut lift = LiftContext::new(store.0.store_opaque_mut(), &options, instance);
         lift.enter_call();
-        let opa_vals =
-            unsafe { lift_args_for_opa(&mut lift, &types, storage, param_tuple, max_flat)? };
+        let mut opa_vals = Vec::new();
+        unsafe {
+            dynamic_params_load(
+                &mut lift,
+                &types,
+                storage,
+                param_tuple,
+                &mut opa_vals,
+                max_flat,
+                true,
+            )?
+        };
         let skip = if metadata.resource.is_some() { 1 } else { 0 };
         let opa_args: Vec<serde_json::Value> = opa_vals[skip..].iter().map(val_to_json).collect();
         query_opa(
@@ -986,6 +952,7 @@ where
             param_tys,
             &mut params_and_results,
             max_flat,
+            false,
         )?
     };
     let result_start = params_and_results.len();
@@ -1119,6 +1086,7 @@ where
 ///
 /// # Safety
 ///
+/// Only set skip_resources when you now what you are doing
 /// Requires that `param_tys` matches the type signature of the `storage` that
 /// was passed in.
 unsafe fn dynamic_params_load(
@@ -1128,6 +1096,7 @@ unsafe fn dynamic_params_load(
     param_tys: &TypeTuple,
     params: &mut Vec<Val>,
     max_flat_params: usize,
+    skip_resources: bool,
 ) -> Result<usize> {
     if let Some(param_count) = param_tys.abi.flat_count(max_flat_params) {
         // NB: can use `MaybeUninit::slice_assume_init_ref` when that's stable
@@ -1135,7 +1104,12 @@ unsafe fn dynamic_params_load(
             unsafe { mem::transmute::<&[MaybeUninit<ValRaw>], &[ValRaw]>(&storage[..param_count]) };
         let mut iter = storage.iter();
         for ty in param_tys.types.iter() {
-            params.push(Val::lift(cx, *ty, &mut iter)?);
+            if skip_resources && matches!(*ty, InterfaceType::Own(_) | InterfaceType::Borrow(_)) {
+                let _ = iter.next(); // Consume slot
+                params.push(Val::Bool(false));
+            } else {
+                params.push(Val::lift(cx, *ty, &mut iter)?);
+            }
         }
         assert!(iter.next().is_none());
         Ok(param_count)
@@ -1147,7 +1121,11 @@ unsafe fn dynamic_params_load(
             let abi = types.canonical_abi(ty);
             let size = usize::try_from(abi.size32).unwrap();
             let memory = &cx.memory()[abi.next_field32_size(&mut offset)..][..size];
-            params.push(Val::load(cx, *ty, memory)?);
+            if skip_resources && matches!(*ty, InterfaceType::Own(_) | InterfaceType::Borrow(_)) {
+                params.push(Val::Bool(false));
+            } else {
+                params.push(Val::load(cx, *ty, memory)?);
+            }
         }
         Ok(1)
     }
