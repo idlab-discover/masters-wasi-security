@@ -75,14 +75,6 @@ pub struct RunCommand {
     /// arguments will be interpreted as arguments to the function specified.
     #[arg(value_name = "WASM", trailing_var_arg = true, required = true)]
     pub module_and_args: Vec<OsString>,
-
-    /// Path to a YAML policy file that controls which host functions are
-    /// allowed to be called by the WebAssembly component.
-    ///
-    /// The policy file uses a `default-mode` of `allow` or `deny` and then
-    /// defines per-package/interface/resource/function overrides.
-    #[arg(long = "wasm-policy", value_name = "FILE")]
-    pub wasm_policy: Option<PathBuf>,
 }
 
 enum CliLinker {
@@ -127,45 +119,12 @@ impl RunCommand {
             }
         }
 
-        // If a wasm policy file was specified, parse it and pass it to the linker.
-        let wasm_policy = Arc::new(match &self.wasm_policy {
-            Some(policy_path) => {
-                #[cfg(feature = "component-model")]
-                {
-                    match &main {
-                        RunTarget::Component(_) => {}
-                        _ => {
-                            bail!("--wasm-policy is only supported with components");
-                        }
-                    }
-                    let policy_contents =
-                        std::fs::read_to_string(policy_path).with_context(|| {
-                            format!(
-                                "failed to read wasm policy file `{}`",
-                                policy_path.display()
-                            )
-                        })?;
-                    serde_yaml::from_str(&policy_contents).with_context(|| {
-                        format!(
-                            "failed to parse wasm policy file `{}`",
-                            policy_path.display()
-                        )
-                    })?
-                }
-                #[cfg(not(feature = "component-model"))]
-                {
-                    bail!("--wasm-policy requires the component-model feature");
-                }
-            }
-            None => wasmtime::component::WasmPolicy::new_no_file(),
-        });
-
         let mut linker = match &main {
             RunTarget::Core(_) => CliLinker::Core(wasmtime::Linker::new(&engine)),
             #[cfg(feature = "component-model")]
-            RunTarget::Component(_) => CliLinker::Component(
-                wasmtime::component::Linker::new_with_policy(&engine, wasm_policy.clone()),
-            ),
+            RunTarget::Component(_) => {
+                CliLinker::Component(wasmtime::component::Linker::new(&engine))
+            }
         };
         if let Some(enable) = self.run.common.wasm.unknown_exports_allow {
             match &mut linker {
@@ -301,13 +260,6 @@ impl RunCommand {
                     }
                 }
                 return Err(e);
-            }
-        }
-
-        #[cfg(feature = "component-model")]
-        if let Ok(complaints) = wasm_policy.complaints.lock() {
-            for complaint in complaints.iter() {
-                println!("{complaint}");
             }
         }
 
