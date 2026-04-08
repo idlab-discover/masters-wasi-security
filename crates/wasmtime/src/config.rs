@@ -164,6 +164,7 @@ pub struct Config {
     pub(crate) macos_use_mach_ports: bool,
     pub(crate) detect_host_feature: Option<fn(&str) -> Option<bool>>,
     pub(crate) x86_float_abi_ok: Option<bool>,
+    pub(crate) opa_url: Option<String>,
 }
 
 /// User-provided configuration for the compiler.
@@ -273,6 +274,7 @@ impl Config {
             #[cfg(not(feature = "std"))]
             detect_host_feature: None,
             x86_float_abi_ok: None,
+            opa_url: None,
         };
         #[cfg(any(feature = "cranelift", feature = "winch"))]
         {
@@ -428,6 +430,14 @@ impl Config {
     #[cfg(feature = "async")]
     pub fn async_support(&mut self, enable: bool) -> &mut Self {
         self.async_support = enable;
+        self
+    }
+
+    /// Configures the URL for the Open Policy Agent (OPA) server used for policy enforcement.
+    ///
+    /// If provided, this URL will be used to query the OPA server when host functions are called.
+    pub fn opa_url(&mut self, url: &str) -> &mut Self {
+        self.opa_url = Some(url.to_string());
         self
     }
 

@@ -68,6 +68,10 @@ pub struct RunCommand {
     #[arg(long)]
     pub argv0: Option<String>,
 
+    /// The URL for the Open Policy Agent (OPA) server to use for policy enforcement.
+    #[arg(long, value_name = "URL")]
+    pub opa_url: Option<String>,
+
     /// The WebAssembly module to run and arguments to pass to it.
     ///
     /// Arguments passed to the wasm module will be configured as WASI CLI
@@ -90,6 +94,9 @@ impl RunCommand {
 
         let mut config = self.run.common.config(None)?;
         config.async_support(true);
+        if let Some(url) = &self.opa_url {
+            config.opa_url(url);
+        }
 
         if self.run.common.wasm.timeout.is_some() {
             config.epoch_interruption(true);

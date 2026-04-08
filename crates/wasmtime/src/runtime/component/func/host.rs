@@ -134,7 +134,15 @@ fn val_to_json(val: &Val) -> serde_json::Value {
 }
 
 /// Query the OPA server with function metadata and optional arguments.
-fn query_opa(metadata: &HostFuncMetadata, args: Option<Vec<serde_json::Value>>) -> Result<()> {
+fn query_opa(
+    metadata: &HostFuncMetadata,
+    args: Option<Vec<serde_json::Value>>,
+    opa_url: Option<&str>,
+) -> Result<()> {
+    if opa_url.is_none() {
+        return Ok(());
+    }
+    let url = opa_url.unwrap();
     let request = OpaRequest {
         input: OpaRequestInput {
             name: &metadata.name,
@@ -147,12 +155,10 @@ fn query_opa(metadata: &HostFuncMetadata, args: Option<Vec<serde_json::Value>>) 
     let body = serde_json::to_string(&request).unwrap();
     println!("{body}"); // TODO: remove when done testing/debugging
 
-    let response = ureq::post("http://localhost:8181/v1/data/component/host_function/allow")
+    let response = ureq::post(url)
         .set("Content-Type", "application/json")
-        .send_string(&body)
-        .expect("Failed to query OPA")
-        .into_json::<OpaResponse>()
-        .expect("Failed to parse OPA response");
+        .send_string(&body)?
+        .into_json::<OpaResponse>()?;
 
     if !response.result {
         bail!("OPA policy denied call to '{}'", metadata.name);
@@ -387,6 +393,8 @@ where
     Params: Lift,
     Return: Lower + 'static,
 {
+    let engine = store.engine().clone();
+    let opa_url = engine.config().opa_url.as_deref();
     let options = Options::new_index(store.0, instance, options_idx);
     let vminstance = instance.id().get(store.0);
     let opts = &vminstance.component().env_component().options[options_idx];
@@ -437,6 +445,7 @@ where
                 } else {
                     Some(opa_args)
                 },
+                opa_url,
             )?;
 
             // Now do the typed lift (same LiftContext, no second enter_call)
@@ -535,6 +544,7 @@ where
             } else {
                 Some(opa_args)
             },
+            opa_url,
         )?;
 
         // Now do the typed lift (same LiftContext, no second enter_call)
@@ -916,6 +926,8 @@ where
         + 'static,
     T: 'static,
 {
+    let engine = store.engine().clone();
+    let opa_url = engine.config().opa_url.as_deref();
     let options = Options::new_index(store.0, instance, options_idx);
     let vminstance = instance.id().get(store.0);
     let opts = &vminstance.component().env_component().options[options_idx];
@@ -971,6 +983,7 @@ where
         } else {
             Some(opa_args)
         },
+        opa_url,
     )?;
 
     for _ in 0..result_tys.types.len() {
