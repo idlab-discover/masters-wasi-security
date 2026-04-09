@@ -16,7 +16,7 @@ use core::future::Future;
 use core::mem::{self, MaybeUninit};
 use core::pin::Pin;
 use core::ptr::NonNull;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use wasmtime_environ::component::{
     CanonicalAbiInfo, ComponentTypes, InterfaceType, MAX_FLAT_ASYNC_PARAMS, MAX_FLAT_PARAMS,
     MAX_FLAT_RESULTS, OptionsIndex, TypeFuncIndex, TypeTuple,
@@ -38,11 +38,6 @@ pub struct HostFuncMetadata {
     pub interface: String,
     #[serde(rename = "pkg")]
     pub package: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct OpaResponse {
-    result: bool,
 }
 
 #[derive(Serialize)]
@@ -133,17 +128,16 @@ fn val_to_json(val: &Val) -> serde_json::Value {
     }
 }
 
-/// Query the OPA server with function metadata and optional arguments.
-fn query_opa(
+/// Evaluate the OPA policy locally with the provided function metadata and optional arguments.
+fn evaluate_policy(
     metadata: &HostFuncMetadata,
     args: Option<Vec<serde_json::Value>>,
-    opa_url: Option<&str>,
+    engine: Option<&alloc::sync::Arc<regorus::Engine>>,
 ) -> Result<()> {
-    if opa_url.is_none() {
-        println!("No OPA URL provided");
+    let Some(engine) = engine else {
         return Ok(());
-    }
-    let url = opa_url.unwrap();
+    };
+
     let request = OpaRequest {
         input: OpaRequestInput {
             name: &metadata.name,
@@ -153,15 +147,14 @@ fn query_opa(
             args,
         },
     };
-    let body = serde_json::to_string(&request).unwrap();
-    println!("{body}"); // TODO: remove when done testing/debugging
 
-    let response = ureq::post(url)
-        .set("Content-Type", "application/json")
-        .send_string(&body)?
-        .into_json::<OpaResponse>()?;
+    let mut eval_engine = engine.as_ref().clone();
+    let input_val = regorus::Value::from_json_str(&serde_json::to_string(&request.input)?)?;
+    eval_engine.set_input(input_val);
 
-    if !response.result {
+    let result = eval_engine.eval_rule("data.component.host_function.allow".to_string())?;
+
+    if result != regorus::Value::Bool(true) {
         bail!("OPA policy denied call to '{}'", metadata.name);
     }
     Ok(())
@@ -395,7 +388,7 @@ where
     Return: Lower + 'static,
 {
     let engine = store.engine().clone();
-    let opa_url = engine.config().opa_url.as_deref();
+    let wasm_policy_engine = engine.config().wasm_policy_engine.as_ref();
     let options = Options::new_index(store.0, instance, options_idx);
     let vminstance = instance.id().get(store.0);
     let opts = &vminstance.component().env_component().options[options_idx];
@@ -439,14 +432,14 @@ where
             let skip = if metadata.resource.is_some() { 1 } else { 0 };
             let opa_args: Vec<serde_json::Value> =
                 opa_vals[skip..].iter().map(val_to_json).collect();
-            query_opa(
+            evaluate_policy(
                 metadata,
                 if opa_args.is_empty() {
                     None
                 } else {
                     Some(opa_args)
                 },
-                opa_url,
+                wasm_policy_engine,
             )?;
 
             // Now do the typed lift (same LiftContext, no second enter_call)
@@ -538,14 +531,14 @@ where
         };
         let skip = if metadata.resource.is_some() { 1 } else { 0 };
         let opa_args: Vec<serde_json::Value> = opa_vals[skip..].iter().map(val_to_json).collect();
-        query_opa(
+        evaluate_policy(
             metadata,
             if opa_args.is_empty() {
                 None
             } else {
                 Some(opa_args)
             },
-            opa_url,
+            wasm_policy_engine,
         )?;
 
         // Now do the typed lift (same LiftContext, no second enter_call)
@@ -928,7 +921,7 @@ where
     T: 'static,
 {
     let engine = store.engine().clone();
-    let opa_url = engine.config().opa_url.as_deref();
+    let wasm_policy_engine = engine.config().wasm_policy_engine.as_ref();
     let options = Options::new_index(store.0, instance, options_idx);
     let vminstance = instance.id().get(store.0);
     let opts = &vminstance.component().env_component().options[options_idx];
@@ -977,14 +970,14 @@ where
         .iter()
         .map(val_to_json)
         .collect();
-    query_opa(
+    evaluate_policy(
         metadata,
         if opa_args.is_empty() {
             None
         } else {
             Some(opa_args)
         },
-        opa_url,
+        wasm_policy_engine,
     )?;
 
     for _ in 0..result_tys.types.len() {

@@ -156,7 +156,7 @@ impl VMGcObjectData {
             Some(into) => into,
             None => panic!(
                 "out of bounds field! field range = {offset:#x}..{end:#x}; object len = {:#x}",
-                self.data.as_mut().len(),
+                self.data.len(),
             ),
         };
         val.write_le(into.try_into().unwrap());

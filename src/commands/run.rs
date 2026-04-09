@@ -68,9 +68,13 @@ pub struct RunCommand {
     #[arg(long)]
     pub argv0: Option<String>,
 
-    /// The URL for the Open Policy Agent (OPA) server to use for policy enforcement.
-    #[arg(long, value_name = "URL")]
-    pub opa_url: Option<String>,
+    /// The path to a Rego rules file for Wasm policy enforcement.
+    #[arg(long, value_name = "RULES_FILE")]
+    pub wasm_policy_rules: Option<PathBuf>,
+
+    /// The path to a JSON/YAML data file for Wasm policy enforcement.
+    #[arg(long, value_name = "DATA_FILE")]
+    pub wasm_policy_data: Option<PathBuf>,
 
     /// The WebAssembly module to run and arguments to pass to it.
     ///
@@ -94,8 +98,8 @@ impl RunCommand {
 
         let mut config = self.run.common.config(None)?;
         config.async_support(true);
-        if let Some(url) = &self.opa_url {
-            config.opa_url(url);
+        if let Some(rules) = &self.wasm_policy_rules {
+            config.wasm_policy(rules, self.wasm_policy_data.as_deref())?;
         }
 
         if self.run.common.wasm.timeout.is_some() {

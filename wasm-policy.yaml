@@ -59,6 +59,10 @@ packages:
         allow: true # this overwrites the deny for all functions in this package
       stdout:
         allow: true
+      stderr:
+        allow: true
+  wasi:filesystem:
+    allow: true
   wasi:sockets:
     interfaces:
       tcp-create-socket:

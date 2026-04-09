@@ -164,7 +164,7 @@ pub struct Config {
     pub(crate) macos_use_mach_ports: bool,
     pub(crate) detect_host_feature: Option<fn(&str) -> Option<bool>>,
     pub(crate) x86_float_abi_ok: Option<bool>,
-    pub(crate) opa_url: Option<String>,
+    pub(crate) wasm_policy_engine: Option<Arc<regorus::Engine>>,
 }
 
 /// User-provided configuration for the compiler.
@@ -274,7 +274,7 @@ impl Config {
             #[cfg(not(feature = "std"))]
             detect_host_feature: None,
             x86_float_abi_ok: None,
-            opa_url: None,
+            wasm_policy_engine: None,
         };
         #[cfg(any(feature = "cranelift", feature = "winch"))]
         {
@@ -433,12 +433,27 @@ impl Config {
         self
     }
 
-    /// Configures the URL for the Open Policy Agent (OPA) server used for policy enforcement.
+    /// Configures the Wasm policy for host functions using a Rego rules file and an optional data file.
     ///
-    /// If provided, this URL will be used to query the OPA server when host functions are called.
-    pub fn opa_url(&mut self, url: &str) -> &mut Self {
-        self.opa_url = Some(url.to_string());
-        self
+    /// If provided, Wasmtime will evaluate host function arguments natively against the rego engine
+    /// before propagating calls.
+    pub fn wasm_policy(&mut self, rules_file: &std::path::Path, data_file: Option<&std::path::Path>) -> Result<&mut Self> {
+        let mut engine = regorus::Engine::new();
+        
+        let rules_content = std::fs::read_to_string(rules_file)
+            .map_err(|e| anyhow::anyhow!("failed to read rules file {}: {}", rules_file.display(), e))?;
+        engine.add_policy(rules_file.to_string_lossy().into(), rules_content)?;
+
+        if let Some(df) = data_file {
+            let data_content = std::fs::read_to_string(df)
+                .map_err(|e| anyhow::anyhow!("failed to read data file {}: {}", df.display(), e))?;
+            let value: serde_json::Value = serde_yaml::from_str(&data_content)
+                .map_err(|e| anyhow::anyhow!("failed to parse data file {}: {}", df.display(), e))?;
+            engine.add_data(regorus::Value::from_json_str(&serde_json::to_string(&value)?)?)?;
+        }
+
+        self.wasm_policy_engine = Some(Arc::new(engine));
+        Ok(self)
     }
 
     /// Configures whether DWARF debug information will be emitted during
