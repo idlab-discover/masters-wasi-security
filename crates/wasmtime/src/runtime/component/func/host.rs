@@ -801,7 +801,12 @@ fn check_argument_constraints<T>(
     store: &StoreContextMut<'_, T>,
     max_flat_params: usize,
 ) -> Result<()> {
-    if metadata.arguments.is_empty() {
+    #[cfg(feature = "std")]
+    let should_record_args = metadata.wasm_policy.should_record_arguments();
+    #[cfg(not(feature = "std"))]
+    let should_record_args = false;
+
+    if metadata.arguments.is_empty() && !should_record_args {
         return Ok(());
     }
 
@@ -819,6 +824,11 @@ fn check_argument_constraints<T>(
             &[]
         };
         let mut flat_idx: usize = 0;
+        let mut observed_args = if should_record_args {
+            Some(Vec::new())
+        } else {
+            None
+        };
 
         for (param_idx, param_ty) in param_type_tuple.types.iter().enumerate().skip(offset) {
             let flat_count = types
@@ -827,16 +837,32 @@ fn check_argument_constraints<T>(
                 .unwrap_or(1);
 
             let val = lift_primitive_from_flat(*param_ty, &flat_storage[flat_idx..], memory);
-            if !check_arg_constraint(param_idx, offset, metadata, val.as_ref())? {
+            if let Some(observed) = observed_args.as_mut() {
+                observed.push(val.clone());
+            }
+            if !check_arg_constraint(param_idx, offset, metadata, val.as_ref())? && !should_record_args
+            {
                 break; // no more constraints to check
             }
             flat_idx += flat_count;
+        }
+
+        #[cfg(feature = "std")]
+        if let Some(observed) = observed_args {
+            metadata
+                .wasm_policy
+                .record_function_arguments(metadata, &observed);
         }
     } else {
         // Indirect representation: params are stored in linear memory.
         let memory = options.memory(store.0.store_opaque());
         let ptr_val = unsafe { storage[0].assume_init_ref() };
         let mut mem_ptr = validate_inbounds_dynamic(&param_type_tuple.abi, memory, ptr_val)?;
+        let mut observed_args = if should_record_args {
+            Some(Vec::new())
+        } else {
+            None
+        };
 
         for (param_idx, param_ty) in param_type_tuple.types.iter().enumerate().skip(offset) {
             let abi = types.canonical_abi(param_ty);
@@ -845,9 +871,20 @@ fn check_argument_constraints<T>(
 
             let val =
                 lift_primitive_from_memory(*param_ty, &memory[field_offset..][..size], memory);
-            if !check_arg_constraint(param_idx, offset, metadata, val.as_ref())? {
+            if let Some(observed) = observed_args.as_mut() {
+                observed.push(val.clone());
+            }
+            if !check_arg_constraint(param_idx, offset, metadata, val.as_ref())? && !should_record_args
+            {
                 break; // no more constraints to check
             }
+        }
+
+        #[cfg(feature = "std")]
+        if let Some(observed) = observed_args {
+            metadata
+                .wasm_policy
+                .record_function_arguments(metadata, &observed);
         }
     }
 
@@ -933,12 +970,7 @@ where
         ComponentInstance::enter_host_from_wasm(cx, |store, instance| {
             println!("Calling host function `{:?}`", metadata);
             #[cfg(feature = "std")]
-            metadata.wasm_policy.record_function_call(
-                &metadata.package,
-                &metadata.interface,
-                metadata.resource.as_deref(),
-                &metadata.name,
-            );
+            metadata.wasm_policy.record_function_call(metadata);
             if !metadata.allowed_to_use {
                 let msg = format!(
                     "Host function `{}/{}:{}{}` is not allowed to be used",

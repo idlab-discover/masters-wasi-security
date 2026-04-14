@@ -15,6 +15,7 @@ use std::thread;
 use wasi_common::sync::{Dir, TcpListener, WasiCtxBuilder, ambient_authority};
 use wasmtime::{Engine, Func, Module, Store, StoreLimits, Val, ValType};
 use wasmtime_wasi::{WasiCtxView, WasiView};
+use wasmtime::component::CreateArgsMode;
 
 #[cfg(feature = "wasi-config")]
 use wasmtime_wasi_config::{WasiConfig, WasiConfigVariables};
@@ -37,6 +38,21 @@ fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
         bail!("must contain exactly one equals character ('=')");
     }
     Ok((parts[0].into(), parts[1].into()))
+}
+
+fn parse_wasm_policy_create_args(
+    s: &str,
+) -> std::result::Result<CreateArgsMode, String> {
+    match s {
+        "none" => Ok(CreateArgsMode::None),
+        "all" => Ok(CreateArgsMode::All),
+        other => {
+            let n = other
+                .parse::<usize>()
+                .map_err(|_| format!("invalid value `{other}`; expected `none`, `all`, or a number"))?;
+            Ok(CreateArgsMode::Max(n))
+        }
+    }
 }
 
 /// Runs a WebAssembly module
@@ -88,8 +104,23 @@ pub struct RunCommand {
     ///
     /// In this mode all component host functions are allowed, and every host
     /// function call is collected for later policy generation.
-    #[arg(long = "wasm-policy-create", value_name = "FILE")]
+    #[arg(long = "wasm-policy-create", value_name = "FILE", conflicts_with = "wasm_policy")]
     pub wasm_policy_create: Option<PathBuf>,
+
+    /// Argument recording mode for `--wasm-policy-create`.
+    ///
+    /// `none` (default): don't store arguments.
+    /// `all`: store all seen argument values in allow-lists.
+    /// `<number>`: store up to N unique values per argument, then switch that
+    /// argument to `no-constraint`.
+    #[arg(
+        long = "wasm-policy-create-args",
+        value_name = "all|<number>|none",
+        default_value = "none",
+        requires = "wasm_policy_create",
+        value_parser = parse_wasm_policy_create_args,
+    )]
+    wasm_policy_create_args: CreateArgsMode,
 }
 
 enum CliLinker {
@@ -177,6 +208,7 @@ impl RunCommand {
                     }
                 }
                 wasm_policy.create_mode = true;
+                wasm_policy.create_args_mode = self.wasm_policy_create_args;
             }
             #[cfg(not(feature = "component-model"))]
             {

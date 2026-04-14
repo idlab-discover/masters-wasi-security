@@ -137,7 +137,7 @@ pub use self::resource_table::{ResourceTable, ResourceTableError};
 pub use self::resources::{Resource, ResourceAny};
 pub use self::types::{ResourceType, Type};
 pub use self::values::Val;
-pub use self::wasm_policy::WasmPolicy;
+pub use self::wasm_policy::{CreateArgsMode, WasmPolicy};
 
 pub(crate) use self::instance::RuntimeImport;
 pub(crate) use self::resources::HostResourceData;

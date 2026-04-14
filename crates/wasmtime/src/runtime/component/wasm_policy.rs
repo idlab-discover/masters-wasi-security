@@ -1,11 +1,13 @@
+use super::func::HostFuncMetadata;
 use super::Val;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::fmt;
-use serde::{Deserialize, Serialize};
 use serde::de::{self, MapAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize};
 use wasmtime_environ::component::InterfaceType;
 
 /// Represents the parsed contents of a `wasm-policy.yaml` file.
@@ -48,6 +50,10 @@ pub struct WasmPolicy {
     #[serde(skip)]
     pub create_mode: bool,
 
+    /// How create mode should record function arguments.
+    #[serde(skip)]
+    pub create_args_mode: CreateArgsMode,
+
     /// Per-package policy overrides.
     #[serde(default)]
     pub packages: BTreeMap<String, PackagePolicy>,
@@ -61,6 +67,12 @@ pub struct WasmPolicy {
     #[serde(skip)]
     #[cfg(feature = "std")]
     pub called_functions: std::sync::Arc<std::sync::Mutex<BTreeSet<CalledHostFunction>>>,
+
+    /// Collected argument constraints observed per called host function.
+    #[serde(skip)]
+    #[cfg(feature = "std")]
+    pub called_arguments:
+        std::sync::Arc<std::sync::Mutex<BTreeMap<CalledHostFunction, Vec<ArgumentConstraint>>>>,
 }
 
 /// A called host function, represented by package/interface/resource/function.
@@ -70,6 +82,18 @@ pub struct CalledHostFunction {
     pub interface: String,
     pub resource: Option<String>,
     pub function: String,
+}
+
+/// Controls how create mode records arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CreateArgsMode {
+    /// Do not record arguments.
+    #[default]
+    None,
+    /// Record all observed argument values.
+    All,
+    /// Record up to N unique values per argument, then switch to `no-constraint`.
+    Max(usize),
 }
 
 /// The default access mode when no explicit rule matches.
@@ -168,7 +192,7 @@ pub struct FunctionPolicy {
 /// - allow: true
 ///   s32: [10, 20, 30]
 /// ```
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub enum ArgumentConstraint {
     /// An allow-list of constraint values. The argument must match one of these values.
     AllowList(ConstraintValues),
@@ -182,7 +206,7 @@ pub enum ArgumentConstraint {
 ///
 /// Each variant maps 1:1 to an [`InterfaceType`] primitive, so type
 /// checking against a function signature is a simple discriminant comparison.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub enum ConstraintValues {
     Bool(Vec<bool>),
     S8(Vec<i8>),
@@ -197,6 +221,58 @@ pub enum ConstraintValues {
     Float64(Vec<f64>),
     Char(Vec<char>),
     String(Vec<String>),
+}
+
+impl Serialize for ArgumentConstraint {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = match self {
+            ArgumentConstraint::NoConstraint => serializer.serialize_map(Some(1))?,
+            _ => serializer.serialize_map(Some(2))?,
+        };
+
+        match self {
+            ArgumentConstraint::AllowList(values) => {
+                map.serialize_entry("mode", "allow-list")?;
+                serialize_constraint_values(values, &mut map)?;
+            }
+            ArgumentConstraint::BlockList(values) => {
+                map.serialize_entry("mode", "block-list")?;
+                serialize_constraint_values(values, &mut map)?;
+            }
+            ArgumentConstraint::NoConstraint => {
+                map.serialize_entry("mode", "no-constraint")?;
+            }
+        }
+
+        map.end()
+    }
+}
+
+fn serialize_constraint_values<S>(
+    values: &ConstraintValues,
+    map: &mut S,
+) -> Result<(), S::Error>
+where
+    S: SerializeMap,
+{
+    match values {
+        ConstraintValues::Bool(v) => map.serialize_entry("bool", v),
+        ConstraintValues::S8(v) => map.serialize_entry("s8", v),
+        ConstraintValues::S16(v) => map.serialize_entry("s16", v),
+        ConstraintValues::S32(v) => map.serialize_entry("s32", v),
+        ConstraintValues::S64(v) => map.serialize_entry("s64", v),
+        ConstraintValues::U8(v) => map.serialize_entry("u8", v),
+        ConstraintValues::U16(v) => map.serialize_entry("u16", v),
+        ConstraintValues::U32(v) => map.serialize_entry("u32", v),
+        ConstraintValues::U64(v) => map.serialize_entry("u64", v),
+        ConstraintValues::Float32(v) => map.serialize_entry("f32", v),
+        ConstraintValues::Float64(v) => map.serialize_entry("f64", v),
+        ConstraintValues::Char(v) => map.serialize_entry("char", v),
+        ConstraintValues::String(v) => map.serialize_entry("string", v),
+    }
 }
 
 impl ConstraintValues {
@@ -278,6 +354,85 @@ impl ArgumentConstraint {
             ArgumentConstraint::BlockList(values) => !values.contains_val(val),
             ArgumentConstraint::NoConstraint => true,
         }
+    }
+}
+
+fn push_unique_value<T: PartialEq>(values: &mut Vec<T>, value: T) -> bool {
+    if !values.contains(&value) {
+        values.push(value);
+        true
+    } else {
+        false
+    }
+}
+
+impl ConstraintValues {
+    fn len(&self) -> usize {
+        match self {
+            ConstraintValues::Bool(v) => v.len(),
+            ConstraintValues::S8(v) => v.len(),
+            ConstraintValues::S16(v) => v.len(),
+            ConstraintValues::S32(v) => v.len(),
+            ConstraintValues::S64(v) => v.len(),
+            ConstraintValues::U8(v) => v.len(),
+            ConstraintValues::U16(v) => v.len(),
+            ConstraintValues::U32(v) => v.len(),
+            ConstraintValues::U64(v) => v.len(),
+            ConstraintValues::Float32(v) => v.len(),
+            ConstraintValues::Float64(v) => v.len(),
+            ConstraintValues::Char(v) => v.len(),
+            ConstraintValues::String(v) => v.len(),
+        }
+    }
+
+    fn push_unique(&mut self, val: &Val) -> bool {
+        match (self, val) {
+            (ConstraintValues::Bool(vs), Val::Bool(v)) => push_unique_value(vs, *v),
+            (ConstraintValues::S8(vs), Val::S8(v)) => push_unique_value(vs, *v),
+            (ConstraintValues::S16(vs), Val::S16(v)) => push_unique_value(vs, *v),
+            (ConstraintValues::S32(vs), Val::S32(v)) => push_unique_value(vs, *v),
+            (ConstraintValues::S64(vs), Val::S64(v)) => push_unique_value(vs, *v),
+            (ConstraintValues::U8(vs), Val::U8(v)) => push_unique_value(vs, *v),
+            (ConstraintValues::U16(vs), Val::U16(v)) => push_unique_value(vs, *v),
+            (ConstraintValues::U32(vs), Val::U32(v)) => push_unique_value(vs, *v),
+            (ConstraintValues::U64(vs), Val::U64(v)) => push_unique_value(vs, *v),
+            (ConstraintValues::Float32(vs), Val::Float32(v)) => {
+                if !vs.iter().any(|c| c.to_bits() == v.to_bits()) { vs.push(*v); true } else { false }
+            }
+            (ConstraintValues::Float64(vs), Val::Float64(v)) => {
+                if !vs.iter().any(|c| c.to_bits() == v.to_bits()) { vs.push(*v); true } else { false }
+            }
+            (ConstraintValues::Char(vs), Val::Char(v)) => push_unique_value(vs, *v),
+            (ConstraintValues::String(vs), Val::String(v)) => push_unique_value(vs, v.clone()),
+            _ => false,
+        }
+    }
+}
+
+fn constraint_values_from_val(val: &Val) -> Option<ConstraintValues> {
+    Some(match val {
+        Val::Bool(v) => ConstraintValues::Bool(vec![*v]),
+        Val::S8(v) => ConstraintValues::S8(vec![*v]),
+        Val::S16(v) => ConstraintValues::S16(vec![*v]),
+        Val::S32(v) => ConstraintValues::S32(vec![*v]),
+        Val::S64(v) => ConstraintValues::S64(vec![*v]),
+        Val::U8(v) => ConstraintValues::U8(vec![*v]),
+        Val::U16(v) => ConstraintValues::U16(vec![*v]),
+        Val::U32(v) => ConstraintValues::U32(vec![*v]),
+        Val::U64(v) => ConstraintValues::U64(vec![*v]),
+        Val::Float32(v) => ConstraintValues::Float32(vec![*v]),
+        Val::Float64(v) => ConstraintValues::Float64(vec![*v]),
+        Val::Char(v) => ConstraintValues::Char(vec![*v]),
+        Val::String(v) => ConstraintValues::String(vec![v.clone()]),
+        _ => return None,
+    })
+}
+
+fn max_values_limit(mode: CreateArgsMode) -> Option<usize> {
+    match mode {
+        CreateArgsMode::None => Some(0),
+        CreateArgsMode::All => None,
+        CreateArgsMode::Max(n) => Some(n),
     }
 }
 
@@ -393,12 +548,14 @@ impl<'de> Deserialize<'de> for ArgumentConstraint {
 
 impl WasmPolicy {
     #[cfg(feature = "std")]
+    pub(crate) fn should_record_arguments(&self) -> bool {
+        self.create_mode && self.create_args_mode != CreateArgsMode::None
+    }
+
+    #[cfg(feature = "std")]
     pub(crate) fn record_function_call(
         &self,
-        package: &str,
-        interface: &str,
-        resource: Option<&str>,
-        function_name: &str,
+        metadata: &HostFuncMetadata,
     ) {
         if !self.create_mode {
             return;
@@ -406,11 +563,73 @@ impl WasmPolicy {
 
         if let Ok(mut called) = self.called_functions.lock() {
             called.insert(CalledHostFunction {
-                package: package.to_string(),
-                interface: interface.to_string(),
-                resource: resource.map(|s| s.to_string()),
-                function: function_name.to_string(),
+                package: metadata.package.to_string(),
+                interface: metadata.interface.to_string(),
+                resource: metadata.resource.as_deref().map(|s| s.to_string()),
+                function: metadata.name.to_string(),
             });
+        }
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn record_function_arguments(
+        &self,
+        metadata: &HostFuncMetadata,
+        arguments: &[Option<Val>],
+    ) {
+        if !self.should_record_arguments() {
+            return;
+        }
+
+        let max_values = max_values_limit(self.create_args_mode);
+        let key = CalledHostFunction {
+            package: metadata.package.to_string(),
+            interface: metadata.interface.to_string(),
+            resource: metadata.resource.as_deref().map(|s| s.to_string()),
+            function: metadata.name.to_string(),
+        };
+
+        let Ok(mut map) = self.called_arguments.lock() else {
+            return;
+        };
+        let entry = map.entry(key).or_default();
+        if entry.len() < arguments.len() {
+            entry.resize(arguments.len(), ArgumentConstraint::NoConstraint);
+        }
+
+        for (i, arg) in arguments.iter().enumerate() {
+            let Some(arg) = arg else {
+                entry[i] = ArgumentConstraint::NoConstraint;
+                continue;
+            };
+
+            let Some(initial_values) = constraint_values_from_val(arg) else {
+                entry[i] = ArgumentConstraint::NoConstraint;
+                continue;
+            };
+
+            match &mut entry[i] {
+                ArgumentConstraint::NoConstraint => {
+                    if max_values == Some(0) {
+                        continue;
+                    }
+                    entry[i] = ArgumentConstraint::AllowList(initial_values);
+                }
+                ArgumentConstraint::AllowList(values) => {
+                    if !values.push_unique(arg) {
+                        entry[i] = ArgumentConstraint::NoConstraint;
+                        continue;
+                    }
+                    if let Some(limit) = max_values {
+                        if values.len() > limit {
+                            entry[i] = ArgumentConstraint::NoConstraint;
+                        }
+                    }
+                }
+                ArgumentConstraint::BlockList(_) => {
+                    entry[i] = ArgumentConstraint::NoConstraint;
+                }
+            }
         }
     }
 
@@ -422,6 +641,7 @@ impl WasmPolicy {
         }
 
         let called_functions = self.called_functions.lock().ok()?;
+        let called_arguments = self.called_arguments.lock().ok()?;
         let mut packages: BTreeMap<String, PackagePolicy> = BTreeMap::new();
 
         for called in called_functions.iter() {
@@ -430,10 +650,14 @@ impl WasmPolicy {
                 .interfaces
                 .entry(called.interface.clone())
                 .or_default();
-            let function_policy = FunctionPolicy {
+            let mut function_policy = FunctionPolicy {
                 allow: true,
                 arguments: Vec::new(),
             };
+
+            if let Some(args) = called_arguments.get(called) {
+                function_policy.arguments = args.clone();
+            }
 
             if let Some(resource) = &called.resource {
                 interface
@@ -453,11 +677,14 @@ impl WasmPolicy {
             behaviour_overwrite: BehaviourOverwrite::default(),
             default_mode: DefaultMode::Deny,
             create_mode: false,
+            create_args_mode: CreateArgsMode::None,
             packages,
             #[cfg(feature = "std")]
             complaints: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "std")]
             called_functions: std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new())),
+            #[cfg(feature = "std")]
+            called_arguments: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         })
         .ok()
     }
@@ -520,11 +747,14 @@ impl WasmPolicy {
             behaviour_overwrite: BehaviourOverwrite::default(),
             default_mode: DefaultMode::Allow,
             create_mode: false,
+            create_args_mode: CreateArgsMode::None,
             packages: BTreeMap::new(),
             #[cfg(feature = "std")]
             complaints: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "std")]
             called_functions: std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new())),
+            #[cfg(feature = "std")]
+            called_arguments: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         }
     }
 }
