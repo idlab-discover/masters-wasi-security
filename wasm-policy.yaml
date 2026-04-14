@@ -3,9 +3,9 @@
 default-mode: allow
 
 # behaviour-overwrite: defines if something else needs to happen when blocked / allowed (handy for debugging)
-# behaviour-overwrite: [none(default), complain, create]
+# behaviour-overwrite: [none(default), complain]
 # complain: (writes to stdout after program execution) which function calls would've been blocked, without stopping execution.
-# create: creates a policy file based on execution which would only the function being called for. ignores all policies.
+# create mode is available through CLI with --wasm-policy-create.
 behaviour-overwrite: complain 
 
 packages:

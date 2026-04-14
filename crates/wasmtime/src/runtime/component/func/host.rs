@@ -932,6 +932,13 @@ where
     unsafe {
         ComponentInstance::enter_host_from_wasm(cx, |store, instance| {
             println!("Calling host function `{:?}`", metadata);
+            #[cfg(feature = "std")]
+            metadata.wasm_policy.record_function_call(
+                &metadata.package,
+                &metadata.interface,
+                metadata.resource.as_deref(),
+                &metadata.name,
+            );
             if !metadata.allowed_to_use {
                 let msg = format!(
                     "Host function `{}/{}:{}{}` is not allowed to be used",

@@ -1,9 +1,10 @@
 use super::Val;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::fmt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde::de::{self, MapAccess, Visitor};
 use wasmtime_environ::component::InterfaceType;
 
@@ -32,16 +33,20 @@ use wasmtime_environ::component::InterfaceType;
 ///                   - allow: true
 ///                     s32: [10, 20, 30]
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct WasmPolicy {
     /// The behaviour when a component does something not allowed by policy.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BehaviourOverwrite::is_none")]
     pub behaviour_overwrite: BehaviourOverwrite,
 
     /// The default mode for all functions not explicitly listed.
     /// `"allow"` means functions are allowed by default, `"deny"` means denied.
     pub default_mode: DefaultMode,
+
+    /// Whether to run in create mode, collecting called functions.
+    #[serde(skip)]
+    pub create_mode: bool,
 
     /// Per-package policy overrides.
     #[serde(default)]
@@ -51,10 +56,24 @@ pub struct WasmPolicy {
     #[serde(skip)]
     #[cfg(feature = "std")]
     pub complaints: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+
+    /// Collected host functions that were called while running in create mode.
+    #[serde(skip)]
+    #[cfg(feature = "std")]
+    pub called_functions: std::sync::Arc<std::sync::Mutex<BTreeSet<CalledHostFunction>>>,
+}
+
+/// A called host function, represented by package/interface/resource/function.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CalledHostFunction {
+    pub package: String,
+    pub interface: String,
+    pub resource: Option<String>,
+    pub function: String,
 }
 
 /// The default access mode when no explicit rule matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DefaultMode {
     Allow,
@@ -62,7 +81,7 @@ pub enum DefaultMode {
 }
 
 /// The behaviour when a component does something not allowed by policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BehaviourOverwrite {
     #[default]
@@ -70,11 +89,18 @@ pub enum BehaviourOverwrite {
     Complain,
 }
 
+impl BehaviourOverwrite {
+    fn is_none(&self) -> bool {
+        matches!(self, BehaviourOverwrite::None)
+    }
+}
+
 /// Policy for a specific package (e.g. `wasi:io`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct PackagePolicy {
     /// If set, overrides the default mode for all interfaces in this package.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow: Option<bool>,
 
     /// Per-interface policy overrides.
@@ -83,26 +109,28 @@ pub struct PackagePolicy {
 }
 
 /// Policy for a specific interface (e.g. `streams`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct InterfacePolicy {
     /// If set, overrides the default mode for all items in this interface.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow: Option<bool>,
 
     /// Per-resource policy overrides.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resources: BTreeMap<String, ResourcePolicy>,
 
     /// Per-function policy overrides (for freestanding functions in the interface).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub functions: BTreeMap<String, FunctionPolicy>,
 }
 
 /// Policy for a specific resource (e.g. `input-stream`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ResourcePolicy {
     /// If set, overrides the default mode for all functions in this resource.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow: Option<bool>,
 
     /// Per-function policy overrides within this resource.
@@ -111,14 +139,14 @@ pub struct ResourcePolicy {
 }
 
 /// Policy for a specific function (e.g. `read`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct FunctionPolicy {
     /// Whether this specific function is allowed.
     pub allow: bool,
 
     /// Optional constraints on function arguments.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<ArgumentConstraint>,
 }
 
@@ -140,7 +168,7 @@ pub struct FunctionPolicy {
 /// - allow: true
 ///   s32: [10, 20, 30]
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ArgumentConstraint {
     /// An allow-list of constraint values. The argument must match one of these values.
     AllowList(ConstraintValues),
@@ -154,7 +182,7 @@ pub enum ArgumentConstraint {
 ///
 /// Each variant maps 1:1 to an [`InterfaceType`] primitive, so type
 /// checking against a function signature is a simple discriminant comparison.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ConstraintValues {
     Bool(Vec<bool>),
     S8(Vec<i8>),
@@ -364,6 +392,76 @@ impl<'de> Deserialize<'de> for ArgumentConstraint {
 }
 
 impl WasmPolicy {
+    #[cfg(feature = "std")]
+    pub(crate) fn record_function_call(
+        &self,
+        package: &str,
+        interface: &str,
+        resource: Option<&str>,
+        function_name: &str,
+    ) {
+        if !self.create_mode {
+            return;
+        }
+
+        if let Ok(mut called) = self.called_functions.lock() {
+            called.insert(CalledHostFunction {
+                package: package.to_string(),
+                interface: interface.to_string(),
+                resource: resource.map(|s| s.to_string()),
+                function: function_name.to_string(),
+            });
+        }
+    }
+
+    /// Renders the recorded calls as a YAML policy file for create mode.
+    #[cfg(feature = "std")]
+    pub fn create_policy_yaml(&self) -> Option<String> {
+        if !self.create_mode {
+            return None;
+        }
+
+        let called_functions = self.called_functions.lock().ok()?;
+        let mut packages: BTreeMap<String, PackagePolicy> = BTreeMap::new();
+
+        for called in called_functions.iter() {
+            let package = packages.entry(called.package.clone()).or_default();
+            let interface = package
+                .interfaces
+                .entry(called.interface.clone())
+                .or_default();
+            let function_policy = FunctionPolicy {
+                allow: true,
+                arguments: Vec::new(),
+            };
+
+            if let Some(resource) = &called.resource {
+                interface
+                    .resources
+                    .entry(resource.clone())
+                    .or_default()
+                    .functions
+                    .insert(called.function.clone(), function_policy);
+            } else {
+                interface
+                    .functions
+                    .insert(called.function.clone(), function_policy);
+            }
+        }
+
+        serde_yaml::to_string(&WasmPolicy {
+            behaviour_overwrite: BehaviourOverwrite::default(),
+            default_mode: DefaultMode::Deny,
+            create_mode: false,
+            packages,
+            #[cfg(feature = "std")]
+            complaints: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            #[cfg(feature = "std")]
+            called_functions: std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new())),
+        })
+        .ok()
+    }
+
     /// Determines whether a host function identified by package, interface, and
     /// function name is allowed to be called according to this policy.
     ///
@@ -421,9 +519,12 @@ impl WasmPolicy {
         WasmPolicy {
             behaviour_overwrite: BehaviourOverwrite::default(),
             default_mode: DefaultMode::Allow,
+            create_mode: false,
             packages: BTreeMap::new(),
             #[cfg(feature = "std")]
             complaints: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            #[cfg(feature = "std")]
+            called_functions: std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new())),
         }
     }
 }

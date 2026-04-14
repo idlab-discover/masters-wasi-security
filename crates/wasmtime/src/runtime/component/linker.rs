@@ -476,9 +476,12 @@ impl<T: 'static> LinkerInstance<'_, T> {
                 resource = None;
                 fname = name;
             }
-            let (allowed_to_use, arguments) = self
-                .wasm_policy
-                .is_allowed(package, interface, resource, fname);
+            let (allowed_to_use, arguments) = if self.wasm_policy.create_mode {
+                (true, Vec::new())
+            } else {
+                self.wasm_policy
+                    .is_allowed(package, interface, resource, fname)
+            };
             HostFuncMetadata {
                 allowed_to_use: allowed_to_use,
                 name: fname.to_string(),

@@ -83,6 +83,13 @@ pub struct RunCommand {
     /// defines per-package/interface/resource/function overrides.
     #[arg(long = "wasm-policy", value_name = "FILE")]
     pub wasm_policy: Option<PathBuf>,
+
+    /// Enable wasm policy create mode and write the generated policy to the given file.
+    ///
+    /// In this mode all component host functions are allowed, and every host
+    /// function call is collected for later policy generation.
+    #[arg(long = "wasm-policy-create", value_name = "FILE")]
+    pub wasm_policy_create: Option<PathBuf>,
 }
 
 enum CliLinker {
@@ -128,7 +135,7 @@ impl RunCommand {
         }
 
         // If a wasm policy file was specified, parse it and pass it to the linker.
-        let wasm_policy = Arc::new(match &self.wasm_policy {
+        let mut wasm_policy = match &self.wasm_policy {
             Some(policy_path) => {
                 #[cfg(feature = "component-model")]
                 {
@@ -158,7 +165,26 @@ impl RunCommand {
                 }
             }
             None => wasmtime::component::WasmPolicy::new_no_file(),
-        });
+        };
+
+        if self.wasm_policy_create.is_some() {
+            #[cfg(feature = "component-model")]
+            {
+                match &main {
+                    RunTarget::Component(_) => {}
+                    _ => {
+                        bail!("--wasm-policy-create is only supported with components");
+                    }
+                }
+                wasm_policy.create_mode = true;
+            }
+            #[cfg(not(feature = "component-model"))]
+            {
+                bail!("--wasm-policy-create requires the component-model feature");
+            }
+        }
+
+        let wasm_policy = Arc::new(wasm_policy);
 
         let mut linker = match &main {
             RunTarget::Core(_) => CliLinker::Core(wasmtime::Linker::new(&engine)),
@@ -305,7 +331,14 @@ impl RunCommand {
         }
 
         #[cfg(feature = "component-model")]
-        if let Ok(complaints) = wasm_policy.complaints.lock() {
+        if let Some(output_path) = &self.wasm_policy_create {
+            let policy_yaml = wasm_policy
+                .create_policy_yaml()
+                .context("failed to generate wasm policy yaml")?;
+            std::fs::write(output_path, policy_yaml).with_context(|| {
+                format!("failed to write wasm policy file `{}`", output_path.display())
+            })?;
+        } else if let Ok(complaints) = wasm_policy.complaints.lock() {
             for complaint in complaints.iter() {
                 println!("{complaint}");
             }
