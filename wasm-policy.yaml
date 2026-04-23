@@ -69,4 +69,4 @@ packages:
                 allow: true
                 arguments:
                   - mode: block-list
-                    bool: [true]   # arg 0: bool, block value 'false'
+                    bool: [false]   # arg 0: bool, block value 'false'

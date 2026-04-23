@@ -305,27 +305,32 @@ where
     let ty = &types[ty];
     let param_tys = InterfaceType::Tuple(ty.params);
     let result_tys = InterfaceType::Tuple(ty.results);
+    let param_tuple = &types[ty.params];
 
     if async_ {
         #[cfg(feature = "component-model-async")]
         {
-            check_argument_constraints(
-                metadata,
-                &types,
-                ty,
-                &options,
-                storage,
-                &store,
-                MAX_FLAT_ASYNC_PARAMS,
-            )?;
+            let mut lift = LiftContext::new(store.0.store_opaque_mut(), &options, instance);
+            lift.enter_call();
+
+            let mut host_args = Vec::new();
+            unsafe {
+                dynamic_params_load(
+                    &mut lift,
+                    &types,
+                    storage,
+                    param_tuple,
+                    &mut host_args,
+                    MAX_FLAT_ASYNC_PARAMS,
+                    true,
+                )?
+            };
+            check_argument_constraints(metadata, &host_args)?;
 
             let mut storage = unsafe { Storage::<'_, Params, u32>::new_async::<Return>(storage) };
 
-            // Lift the parameters, either from flat storage or from linear
-            // memory.
-            let lift = &mut LiftContext::new(store.0.store_opaque_mut(), &options, instance);
-            lift.enter_call();
-            let params = storage.lift_params(lift, param_tys)?;
+            // Lift the typed parameters from the same call context used above.
+            let params = storage.lift_params(&mut lift, param_tys)?;
 
             // Load the return pointer, if present.
             let retptr = match storage.async_retptr() {
@@ -393,19 +398,24 @@ where
             );
         }
     } else {
-        check_argument_constraints(
-            metadata,
-            &types,
-            ty,
-            &options,
-            storage,
-            &store,
-            MAX_FLAT_PARAMS,
-        )?;
-
-        let mut storage = unsafe { Storage::<'_, Params, Return>::new_sync(storage) };
         let mut lift = LiftContext::new(store.0.store_opaque_mut(), &options, instance);
         lift.enter_call();
+
+        let mut host_args = Vec::new();
+        unsafe {
+            dynamic_params_load(
+                &mut lift,
+                &types,
+                storage,
+                param_tuple,
+                &mut host_args,
+                MAX_FLAT_PARAMS,
+                true,
+            )?
+        };
+        check_argument_constraints(metadata, &host_args)?;
+
+        let mut storage = unsafe { Storage::<'_, Params, Return>::new_sync(storage) };
         let params = storage.lift_params(&mut lift, param_tys)?;
 
         let ret = match closure(store.as_context_mut(), instance, params) {
@@ -786,174 +796,78 @@ fn check_arg_constraint(
     }
 }
 
+// TODO: check how we could add these to the yaml policy such that we can put constraints on all arguments, not just primitives
+fn constrainable_val(val: &Val) -> Option<&Val> {
+    match val {
+        Val::Bool(_)
+        | Val::S8(_)
+        | Val::U8(_)
+        | Val::S16(_)
+        | Val::U16(_)
+        | Val::S32(_)
+        | Val::U32(_)
+        | Val::S64(_)
+        | Val::U64(_)
+        | Val::Float32(_)
+        | Val::Float64(_)
+        | Val::Char(_)
+        | Val::String(_) => Some(val),
+        _ => None,
+    }
+}
+
 /// Check argument constraints against actual parameter values before invoking
-/// the host closure. Only primitive types are inspected, so resource-table
-/// state is never touched and the typed lift that follows stays valid.
-///
-/// `max_flat_params` controls the flattening threshold: use [`MAX_FLAT_PARAMS`]
-/// for synchronous calls and [`MAX_FLAT_ASYNC_PARAMS`] for asynchronous ones.
-fn check_argument_constraints<T>(
-    metadata: &HostFuncMetadata,
-    types: &ComponentTypes,
-    ty: &wasmtime_environ::component::TypeFunc,
-    options: &Options,
-    storage: &[MaybeUninit<ValRaw>],
-    store: &StoreContextMut<'_, T>,
-    max_flat_params: usize,
-) -> Result<()> {
+/// the host closure.
+fn check_argument_constraints(metadata: &HostFuncMetadata, params: &[Val]) -> Result<()> {
     #[cfg(feature = "std")]
     let should_record_args = metadata.wasm_policy.should_record_arguments();
     #[cfg(not(feature = "std"))]
     let should_record_args = false;
 
+    let offset = metadata.resource.as_ref().map_or(0, |_| 1);
+    let args_to_check = params.get(offset..).unwrap_or(&[]);
+    println!(
+        "Host args for `{}/{}:{}{}`: {:?}",
+        metadata.package,
+        metadata.interface,
+        metadata
+            .resource
+            .as_ref()
+            .map(|r| format!("{r}#"))
+            .unwrap_or_default(),
+        metadata.name,
+        args_to_check
+    );
+
     if metadata.arguments.is_empty() && !should_record_args {
         return Ok(());
     }
 
-    let param_type_tuple = &types[ty.params];
-    let offset = metadata.resource.as_ref().map_or(0, |_| 1);
-
-    if let Some(param_count) = param_type_tuple.abi.flat_count(max_flat_params) {
-        let flat_storage =
-            unsafe { mem::transmute::<&[MaybeUninit<ValRaw>], &[ValRaw]>(&storage[..param_count]) };
-        // Memory is only needed for string constraints; use an empty slice
-        // as a fallback when the component has no linear memory.
-        let memory = if options.has_memory() {
-            options.memory(store.0.store_opaque())
-        } else {
-            &[]
-        };
-        let mut flat_idx: usize = 0;
-        let mut observed_args = if should_record_args {
-            Some(Vec::new())
-        } else {
-            None
-        };
-
-        for (param_idx, param_ty) in param_type_tuple.types.iter().enumerate().skip(offset) {
-            let flat_count = types
-                .canonical_abi(param_ty)
-                .flat_count(max_flat_params)
-                .unwrap_or(1);
-
-            let val = lift_primitive_from_flat(*param_ty, &flat_storage[flat_idx..], memory);
-            if let Some(observed) = observed_args.as_mut() {
-                observed.push(val.clone());
-            }
-            if !check_arg_constraint(param_idx, offset, metadata, val.as_ref())? && !should_record_args
-            {
-                break; // no more constraints to check
-            }
-            flat_idx += flat_count;
-        }
-
-        #[cfg(feature = "std")]
-        if let Some(observed) = observed_args {
-            metadata
-                .wasm_policy
-                .record_function_arguments(metadata, &observed);
-        }
+    let mut observed_args = if should_record_args {
+        Some(Vec::new())
     } else {
-        // Indirect representation: params are stored in linear memory.
-        let memory = options.memory(store.0.store_opaque());
-        let ptr_val = unsafe { storage[0].assume_init_ref() };
-        let mut mem_ptr = validate_inbounds_dynamic(&param_type_tuple.abi, memory, ptr_val)?;
-        let mut observed_args = if should_record_args {
-            Some(Vec::new())
-        } else {
-            None
-        };
+        None
+    };
 
-        for (param_idx, param_ty) in param_type_tuple.types.iter().enumerate().skip(offset) {
-            let abi = types.canonical_abi(param_ty);
-            let size = usize::try_from(abi.size32).unwrap();
-            let field_offset = abi.next_field32_size(&mut mem_ptr);
-
-            let val =
-                lift_primitive_from_memory(*param_ty, &memory[field_offset..][..size], memory);
-            if let Some(observed) = observed_args.as_mut() {
-                observed.push(val.clone());
-            }
-            if !check_arg_constraint(param_idx, offset, metadata, val.as_ref())? && !should_record_args
-            {
-                break; // no more constraints to check
-            }
+    for (param_idx, val) in params.iter().enumerate().skip(offset) {
+        if let Some(observed) = observed_args.as_mut() {
+            observed.push(Some(val.clone()));
         }
-
-        #[cfg(feature = "std")]
-        if let Some(observed) = observed_args {
-            metadata
-                .wasm_policy
-                .record_function_arguments(metadata, &observed);
+        if !check_arg_constraint(param_idx, offset, metadata, constrainable_val(val))?
+            && !should_record_args
+        {
+            break; // no more constraints to check
         }
     }
 
+    #[cfg(feature = "std")]
+    if let Some(observed) = observed_args {
+        metadata
+            .wasm_policy
+            .record_function_arguments(metadata, &observed);
+    }
+
     Ok(())
-}
-
-/// Lift a primitive [`Val`] directly from flat (stack) representation.
-///
-/// Only handles the types supported by [`ConstraintValues`]: booleans,
-/// integers, floats, chars, and strings.  Returns `None` for resource
-/// or compound types so the caller can simply skip them.
-fn lift_primitive_from_flat(ty: InterfaceType, src: &[ValRaw], memory: &[u8]) -> Option<Val> {
-    Some(match ty {
-        InterfaceType::Bool => Val::Bool(src[0].get_i32() != 0),
-        InterfaceType::S8 => Val::S8(src[0].get_i32() as i8),
-        InterfaceType::U8 => Val::U8(src[0].get_i32() as u8),
-        InterfaceType::S16 => Val::S16(src[0].get_i32() as i16),
-        InterfaceType::U16 => Val::U16(src[0].get_i32() as u16),
-        InterfaceType::S32 => Val::S32(src[0].get_i32()),
-        InterfaceType::U32 => Val::U32(src[0].get_u32()),
-        InterfaceType::S64 => Val::S64(src[0].get_i64()),
-        InterfaceType::U64 => Val::U64(src[0].get_u64()),
-        InterfaceType::Float32 => Val::Float32(f32::from_bits(src[0].get_f32())),
-        InterfaceType::Float64 => Val::Float64(f64::from_bits(src[0].get_f64())),
-        InterfaceType::Char => Val::Char(char::from_u32(src[0].get_u32())?),
-        InterfaceType::String => {
-            let ptr = src[0].get_u32() as usize;
-            let len = src[1].get_u32() as usize;
-            let end = ptr.checked_add(len)?;
-            if end > memory.len() {
-                return None;
-            }
-            Val::String(core::str::from_utf8(&memory[ptr..end]).ok()?.into())
-        }
-        _ => return None,
-    })
-}
-
-/// Lift a primitive [`Val`] from its canonical-ABI memory encoding.
-///
-/// Like [`lift_primitive_from_flat`] but reads from a byte slice in linear
-/// memory rather than from flat `ValRaw` slots.
-fn lift_primitive_from_memory(ty: InterfaceType, bytes: &[u8], memory: &[u8]) -> Option<Val> {
-    Some(match ty {
-        InterfaceType::Bool => Val::Bool(bytes[0] != 0),
-        InterfaceType::S8 => Val::S8(bytes[0] as i8),
-        InterfaceType::U8 => Val::U8(bytes[0]),
-        InterfaceType::S16 => Val::S16(i16::from_le_bytes(bytes[..2].try_into().ok()?)),
-        InterfaceType::U16 => Val::U16(u16::from_le_bytes(bytes[..2].try_into().ok()?)),
-        InterfaceType::S32 => Val::S32(i32::from_le_bytes(bytes[..4].try_into().ok()?)),
-        InterfaceType::U32 => Val::U32(u32::from_le_bytes(bytes[..4].try_into().ok()?)),
-        InterfaceType::S64 => Val::S64(i64::from_le_bytes(bytes[..8].try_into().ok()?)),
-        InterfaceType::U64 => Val::U64(u64::from_le_bytes(bytes[..8].try_into().ok()?)),
-        InterfaceType::Float32 => Val::Float32(f32::from_le_bytes(bytes[..4].try_into().ok()?)),
-        InterfaceType::Float64 => Val::Float64(f64::from_le_bytes(bytes[..8].try_into().ok()?)),
-        InterfaceType::Char => Val::Char(char::from_u32(u32::from_le_bytes(
-            bytes[..4].try_into().ok()?,
-        ))?),
-        InterfaceType::String => {
-            let ptr = u32::from_le_bytes(bytes[..4].try_into().ok()?) as usize;
-            let len = u32::from_le_bytes(bytes[4..8].try_into().ok()?) as usize;
-            let end = ptr.checked_add(len)?;
-            if end > memory.len() {
-                return None;
-            }
-            Val::String(core::str::from_utf8(&memory[ptr..end]).ok()?.into())
-        }
-        _ => return None,
-    })
 }
 
 unsafe fn call_host_and_handle_result<T>(
@@ -1108,6 +1022,7 @@ where
             param_tys,
             &mut params_and_results,
             max_flat,
+            false,
         )?
     };
     let result_start = params_and_results.len();
@@ -1115,19 +1030,9 @@ where
         params_and_results.push(Val::Bool(false));
     }
 
-    // Check argument constraints against the already-lifted parameter values.
-    if !metadata.arguments.is_empty() {
-        let offset = metadata.resource.as_ref().map_or(0, |_| 1);
-        for (param_idx, val) in params_and_results[..result_start]
-            .iter()
-            .enumerate()
-            .skip(offset)
-        {
-            if !check_arg_constraint(param_idx, offset, metadata, Some(val))? {
-                break; // no more constraints to check
-            }
-        }
-    }
+    // Check argument constraints (and log args) against the already-lifted
+    // parameter values.
+    check_argument_constraints(metadata, &params_and_results[..result_start])?;
 
     if async_ {
         #[cfg(feature = "component-model-async")]
@@ -1238,6 +1143,7 @@ where
 ///
 /// # Safety
 ///
+/// Only set `skip_resources` to true when you know what you are doing.
 /// Requires that `param_tys` matches the type signature of the `storage` that
 /// was passed in.
 unsafe fn dynamic_params_load(
@@ -1247,6 +1153,7 @@ unsafe fn dynamic_params_load(
     param_tys: &TypeTuple,
     params: &mut Vec<Val>,
     max_flat_params: usize,
+    skip_resources: bool,
 ) -> Result<usize> {
     if let Some(param_count) = param_tys.abi.flat_count(max_flat_params) {
         // NB: can use `MaybeUninit::slice_assume_init_ref` when that's stable
@@ -1254,7 +1161,12 @@ unsafe fn dynamic_params_load(
             unsafe { mem::transmute::<&[MaybeUninit<ValRaw>], &[ValRaw]>(&storage[..param_count]) };
         let mut iter = storage.iter();
         for ty in param_tys.types.iter() {
-            params.push(Val::lift(cx, *ty, &mut iter)?);
+            if skip_resources && matches!(*ty, InterfaceType::Own(_) | InterfaceType::Borrow(_)) {
+                let _ = iter.next();
+                params.push(Val::Bool(false));
+            } else {
+                params.push(Val::lift(cx, *ty, &mut iter)?);
+            }
         }
         assert!(iter.next().is_none());
         Ok(param_count)
@@ -1266,7 +1178,11 @@ unsafe fn dynamic_params_load(
             let abi = types.canonical_abi(ty);
             let size = usize::try_from(abi.size32).unwrap();
             let memory = &cx.memory()[abi.next_field32_size(&mut offset)..][..size];
-            params.push(Val::load(cx, *ty, memory)?);
+            if skip_resources && matches!(*ty, InterfaceType::Own(_) | InterfaceType::Borrow(_)) {
+                params.push(Val::Bool(false));
+            } else {
+                params.push(Val::load(cx, *ty, memory)?);
+            }
         }
         Ok(1)
     }
