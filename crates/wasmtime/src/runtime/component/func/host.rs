@@ -825,19 +825,19 @@ fn check_argument_constraints(metadata: &HostFuncMetadata, params: &[Val]) -> Re
     let should_record_args = false;
 
     let offset = metadata.resource.as_ref().map_or(0, |_| 1);
-    let args_to_check = params.get(offset..).unwrap_or(&[]);
-    println!(
-        "Host args for `{}/{}:{}{}`: {:?}",
-        metadata.package,
-        metadata.interface,
-        metadata
-            .resource
-            .as_ref()
-            .map(|r| format!("{r}#"))
-            .unwrap_or_default(),
-        metadata.name,
-        args_to_check
-    );
+    // let args_to_check = params.get(offset..).unwrap_or(&[]);
+    // println!(
+    //     "Host args for `{}/{}:{}{}`: {:?}",
+    //     metadata.package,
+    //     metadata.interface,
+    //     metadata
+    //         .resource
+    //         .as_ref()
+    //         .map(|r| format!("{r}#"))
+    //         .unwrap_or_default(),
+    //     metadata.name,
+    //     args_to_check
+    // );
 
     if metadata.arguments.is_empty() && !should_record_args {
         return Ok(());
@@ -882,7 +882,7 @@ where
     let cx = unsafe { VMComponentContext::from_opaque(cx) };
     unsafe {
         ComponentInstance::enter_host_from_wasm(cx, |store, instance| {
-            println!("Calling host function `{:?}`", metadata);
+            // println!("Calling host function `{:?}`", metadata);
             #[cfg(feature = "std")]
             metadata.wasm_policy.record_function_call(metadata);
             if !metadata.allowed_to_use {
