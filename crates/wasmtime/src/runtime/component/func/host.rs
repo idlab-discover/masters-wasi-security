@@ -153,7 +153,7 @@ fn query_opa(
         },
     };
     let body = serde_json::to_string(&request).unwrap();
-    println!("{body}"); // TODO: remove when done testing/debugging
+    // println!("{body}"); // TODO: remove when done testing/debugging
 
     let response = ureq::post(url)
         .set("Content-Type", "application/json")
