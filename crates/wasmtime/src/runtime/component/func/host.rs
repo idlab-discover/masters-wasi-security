@@ -819,11 +819,6 @@ fn constrainable_val(val: &Val) -> Option<&Val> {
 /// Check argument constraints against actual parameter values before invoking
 /// the host closure.
 fn check_argument_constraints(metadata: &HostFuncMetadata, params: &[Val]) -> Result<()> {
-    #[cfg(feature = "std")]
-    let should_record_args = metadata.wasm_policy.should_record_arguments();
-    #[cfg(not(feature = "std"))]
-    let should_record_args = false;
-
     let offset = metadata.resource.as_ref().map_or(0, |_| 1);
     // let args_to_check = params.get(offset..).unwrap_or(&[]);
     // println!(
@@ -839,32 +834,22 @@ fn check_argument_constraints(metadata: &HostFuncMetadata, params: &[Val]) -> Re
     //     args_to_check
     // );
 
-    if metadata.arguments.is_empty() && !should_record_args {
+    // if metadata.wasm_policy.should_record_arguments() {
+    //     metadata
+    //         .wasm_policy
+    //         .record_function_arguments(metadata, &params[offset..]);
+    //     return Ok(());
+    // }
+
+    if metadata.arguments.is_empty() {
         return Ok(());
     }
 
-    let mut observed_args = if should_record_args {
-        Some(Vec::new())
-    } else {
-        None
-    };
 
     for (param_idx, val) in params.iter().enumerate().skip(offset) {
-        if let Some(observed) = observed_args.as_mut() {
-            observed.push(Some(val.clone()));
-        }
-        if !check_arg_constraint(param_idx, offset, metadata, constrainable_val(val))?
-            && !should_record_args
-        {
+        if !check_arg_constraint(param_idx, offset, metadata, constrainable_val(val))? {
             break; // no more constraints to check
         }
-    }
-
-    #[cfg(feature = "std")]
-    if let Some(observed) = observed_args {
-        metadata
-            .wasm_policy
-            .record_function_arguments(metadata, &observed);
     }
 
     Ok(())

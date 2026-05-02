@@ -575,7 +575,7 @@ impl WasmPolicy {
     pub(crate) fn record_function_arguments(
         &self,
         metadata: &HostFuncMetadata,
-        arguments: &[Option<Val>],
+        arguments: &[Val],
     ) {
         if !self.should_record_arguments() {
             return;
@@ -598,11 +598,6 @@ impl WasmPolicy {
         }
 
         for (i, arg) in arguments.iter().enumerate() {
-            let Some(arg) = arg else {
-                entry[i] = ArgumentConstraint::NoConstraint;
-                continue;
-            };
-
             let Some(initial_values) = constraint_values_from_val(arg) else {
                 entry[i] = ArgumentConstraint::NoConstraint;
                 continue;
