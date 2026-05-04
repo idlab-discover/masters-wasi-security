@@ -370,10 +370,8 @@ impl RunCommand {
             std::fs::write(output_path, policy_yaml).with_context(|| {
                 format!("failed to write wasm policy file `{}`", output_path.display())
             })?;
-        } else if let Ok(complaints) = wasm_policy.complaints.lock() {
-            for complaint in complaints.iter() {
-                println!("{complaint}");
-            }
+        } else {
+            wasm_policy.print_complaints();
         }
 
         Ok(())

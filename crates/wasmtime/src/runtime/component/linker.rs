@@ -477,7 +477,7 @@ impl<T: 'static> LinkerInstance<'_, T> {
                 fname = name;
             }
             let (allowed_to_use, arguments) = if self.wasm_policy.create_mode {
-                (true, Vec::new())
+                (true, std::collections::BTreeMap::new())
             } else {
                 self.wasm_policy
                     .is_allowed(package, interface, resource, fname)

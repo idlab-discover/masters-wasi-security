@@ -36,7 +36,7 @@ pub struct HostFuncMetadata {
     pub resource: Option<String>,
     pub interface: String,
     pub package: String,
-    pub arguments: Vec<ArgumentConstraint>,
+    pub arguments: std::collections::BTreeMap<usize, ArgumentConstraint>,
     pub wasm_policy: Arc<WasmPolicy>,
 }
 
@@ -275,12 +275,8 @@ fn validate_function_allowed_and_types_match(
     // check if function allowed
     if !metadata.allowed_to_use {
         let msg = format!("{} is not allowed to be used", metadata);
-        if !metadata.wasm_policy.behaviour_overwrite.is_complain() {
+        if !metadata.wasm_policy.log_complaint(&msg) {
             bail!(msg);
-        }
-        #[cfg(feature = "std")]
-        if let Ok(mut complaints) = metadata.wasm_policy.complaints.lock() {
-            complaints.push(msg);
         }
     }
 
@@ -288,29 +284,44 @@ fn validate_function_allowed_and_types_match(
     let ty = &types.types[ty];
     let param_tys = &types.types[ty.params].types;
     let offset = metadata.resource.as_ref().map_or(0, |_| 1);
-    for (i, constraint) in metadata.arguments.iter().enumerate() {
-        if let Some(f_arg_ty) = param_tys.get(i + offset) {
-            match constraint {
-                ArgumentConstraint::AllowList(v) | ArgumentConstraint::BlockList(v) => {
-                    if !v.matches_interface_type(*f_arg_ty) {
-                        bail!(
-                            "policy argument type mismatch for {} at argument {}: policy defined `{:?}` but function parameter is `{:?}`",
-                            metadata,
-                            i,
-                            v.interface_type(),
-                            f_arg_ty
-                        );
-                    }
-                }
-                ArgumentConstraint::NoConstraint => {}
-            }
-        } else {
-            bail!(
-                "policy issue: {} has {} argument constraint(s), but the Host function only has {} parameters",
+    for (&i, constraint) in metadata.arguments.iter() {
+        let Some(f_arg_ty) = param_tys.get(i + offset) else {
+            let msg = format!(
+                "policy issue: {} has an argument constraint at index {}, but the Host function only has {} parameters",
                 metadata,
-                metadata.arguments.len(),
+                i,
                 param_tys.len()
             );
+            if !metadata.wasm_policy.log_complaint(&msg) {
+                bail!(msg);
+            }
+            continue;
+        };
+
+        // TODO: remove this once we have a nice way to display all types
+        if !constrainable_ty(f_arg_ty) {
+            bail!("policy issue: {} has an argument constraint at index {}, but the parameter type `{:?}` is not a valid type to constrain",
+                metadata,
+                i,
+                f_arg_ty
+            );
+        }
+
+        match constraint {
+            ArgumentConstraint::AllowList(v) | ArgumentConstraint::BlockList(v) => {
+                if !v.matches_interface_type(*f_arg_ty) {
+                    let msg = format!(
+                        "policy argument type mismatch for {} at argument {}: policy defined `{:?}` but function parameter is `{:?}`",
+                        metadata,
+                        i,
+                        v.interface_type(),
+                        f_arg_ty
+                    );
+                    if !metadata.wasm_policy.log_complaint(&msg) {
+                        bail!(msg);
+                    }
+                }
+            }
         }
     }
     
@@ -817,60 +828,23 @@ pub(crate) fn validate_inbounds<T: ComponentType>(memory: &[u8], ptr: &ValRaw) -
     Ok(ptr)
 }
 
-/// returns `true` if a constraint was checked, `false` if there was no constraint to check
-/// does some needed checks and checks if the value satisfies the constraint
-fn check_arg_constraint(
-    idx: usize,
-    offset: usize,
-    metadata: &HostFuncMetadata,
-    val: Option<&Val>,
-) -> Result<bool, anyhow::Error> {
-    if let Some(constraint) = metadata.arguments.get(idx - offset) {
-        if let Some(val) = val {
-            // if none -> argument not a primitive type
-            if !constraint.check_val(val) {
-                let msg = format!(
-                    "Argument {} of {} violates policy constraint: value {:?} does not satisfy constraint {:?}",
-                    idx - offset,
-                    metadata,
-                    val,
-                    constraint
-                );
-                if metadata.wasm_policy.behaviour_overwrite
-                    == crate::component::wasm_policy::BehaviourOverwrite::Complain
-                {
-                    #[cfg(feature = "std")]
-                    if let Ok(mut complaints) = metadata.wasm_policy.complaints.lock() {
-                        complaints.push(msg);
-                    }
-                } else {
-                    bail!("{msg}");
-                }
-            }
-        }
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
 // TODO: check how we could add these to the yaml policy such that we can put constraints on all arguments, not just primitives
-fn constrainable_val(val: &Val) -> Option<&Val> {
-    match val {
-        Val::Bool(_)
-        | Val::S8(_)
-        | Val::U8(_)
-        | Val::S16(_)
-        | Val::U16(_)
-        | Val::S32(_)
-        | Val::U32(_)
-        | Val::S64(_)
-        | Val::U64(_)
-        | Val::Float32(_)
-        | Val::Float64(_)
-        | Val::Char(_)
-        | Val::String(_) => Some(val),
-        _ => None,
+fn constrainable_ty(ty: &InterfaceType) -> bool {
+    match ty {
+        InterfaceType::Bool
+        | InterfaceType::S8
+        | InterfaceType::U8
+        | InterfaceType::S16
+        | InterfaceType::U16
+        | InterfaceType::S32
+        | InterfaceType::U32
+        | InterfaceType::S64
+        | InterfaceType::U64
+        | InterfaceType::Float32
+        | InterfaceType::Float64
+        | InterfaceType::Char
+        | InterfaceType::String => true,
+        _ => false,
     }
 }
 
@@ -892,14 +866,16 @@ fn check_argument_constraints(metadata: &HostFuncMetadata, params: &[Val]) -> Re
         return Ok(());
     }
 
-    if metadata.arguments.is_empty() {
-        return Ok(());
-    }
 
-
-    for (param_idx, val) in params.iter().enumerate().skip(offset) {
-        if !check_arg_constraint(param_idx, offset, metadata, constrainable_val(val))? {
-            break; // no more constraints to check
+    for (i, constraint) in metadata.arguments.iter() {
+        let val = &params[i + offset];
+        if !constraint.check_val(val) {
+            let msg = format!(
+                "Argument {i} of {metadata} violates policy constraint: value {val:?} does not satisfy constraint {constraint:?}"
+            );
+            if !metadata.wasm_policy.log_complaint(&msg) {
+                bail!(msg);
+            }
         }
     }
 

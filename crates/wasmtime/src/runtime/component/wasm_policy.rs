@@ -40,7 +40,7 @@ use wasmtime_environ::component::InterfaceType;
 pub struct WasmPolicy {
     /// The behaviour when a component does something not allowed by policy.
     #[serde(default, skip_serializing_if = "BehaviourOverwrite::is_none")]
-    pub behaviour_overwrite: BehaviourOverwrite,
+    behaviour_overwrite: BehaviourOverwrite,
 
     /// The default mode for all functions not explicitly listed.
     /// `"allow"` means functions are allowed by default, `"deny"` means denied.
@@ -61,7 +61,7 @@ pub struct WasmPolicy {
     /// Collected complaints for this policy.
     #[serde(skip)]
     #[cfg(feature = "std")]
-    pub complaints: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    complaints: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 
     /// Collected host functions that were called while running in create mode.
     #[serde(skip)]
@@ -72,7 +72,7 @@ pub struct WasmPolicy {
     #[serde(skip)]
     #[cfg(feature = "std")]
     pub called_arguments:
-        std::sync::Arc<std::sync::Mutex<BTreeMap<CalledHostFunction, Vec<ArgumentConstraint>>>>,
+        std::sync::Arc<std::sync::Mutex<BTreeMap<CalledHostFunction, BTreeMap<usize, ArgumentConstraint>>>>,
 }
 
 /// A called host function, represented by package/interface/resource/function.
@@ -115,10 +115,10 @@ pub enum BehaviourOverwrite {
 
 impl BehaviourOverwrite {
     fn is_none(&self) -> bool {
-        matches!(self, BehaviourOverwrite::None)
+        *self == BehaviourOverwrite::None
     }
-    pub fn is_complain(&self) -> bool {
-        matches!(self, BehaviourOverwrite::Complain)
+    fn is_complain(&self) -> bool {
+        *self == BehaviourOverwrite::Complain
     }
 }
 
@@ -173,8 +173,8 @@ pub struct FunctionPolicy {
     pub allow: bool,
 
     /// Optional constraints on function arguments.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub arguments: Vec<ArgumentConstraint>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arguments: BTreeMap<usize, ArgumentConstraint>,
 }
 
 /// Constraint for a function argument.
@@ -201,8 +201,6 @@ pub enum ArgumentConstraint {
     AllowList(ConstraintValues),
     /// A block-list of constraint values. The argument must not match any of these values.
     BlockList(ConstraintValues),
-    /// No constraint is applied to this argument.
-    NoConstraint,
 }
 
 /// Typed constraint values that directly correspond to WIT primitive types.
@@ -231,10 +229,7 @@ impl Serialize for ArgumentConstraint {
     where
         S: serde::Serializer,
     {
-        let mut map = match self {
-            ArgumentConstraint::NoConstraint => serializer.serialize_map(Some(1))?,
-            _ => serializer.serialize_map(Some(2))?,
-        };
+        let mut map = serializer.serialize_map(Some(2))?;
 
         match self {
             ArgumentConstraint::AllowList(values) => {
@@ -244,9 +239,6 @@ impl Serialize for ArgumentConstraint {
             ArgumentConstraint::BlockList(values) => {
                 map.serialize_entry("mode", "block-list")?;
                 serialize_constraint_values(values, &mut map)?;
-            }
-            ArgumentConstraint::NoConstraint => {
-                map.serialize_entry("mode", "no-constraint")?;
             }
         }
 
@@ -325,7 +317,7 @@ impl ConstraintValues {
     /// Returns `true` if the given [`Val`] is found in this constraint's value list.
     ///
     /// Returns `false` when the types don't match or the value is not present.
-    pub fn contains_val(&self, val: &Val) -> bool {
+    fn contains_val(&self, val: &Val) -> bool {
         match (self, val) {
             (ConstraintValues::Bool(vs), Val::Bool(v)) => vs.contains(v),
             (ConstraintValues::S8(vs), Val::S8(v)) => vs.contains(v),
@@ -344,7 +336,7 @@ impl ConstraintValues {
             }
             (ConstraintValues::Char(vs), Val::Char(v)) => vs.contains(v),
             (ConstraintValues::String(vs), Val::String(v)) => vs.iter().any(|c| c == v),
-            _ => false,
+            _ => unreachable!("type mismatch between constraint and value"),
         }
     }
 }
@@ -355,7 +347,6 @@ impl ArgumentConstraint {
         match self {
             ArgumentConstraint::AllowList(values) => values.contains_val(val),
             ArgumentConstraint::BlockList(values) => !values.contains_val(val),
-            ArgumentConstraint::NoConstraint => true,
         }
     }
 }
@@ -530,16 +521,8 @@ impl<'de> Deserialize<'de> for ArgumentConstraint {
                             Ok(ArgumentConstraint::BlockList(values))
                         }
                     }
-                    "no-constraint" => {
-                        if values.is_some() {
-                            return Err(de::Error::custom(
-                                "no-constraint mode does not take a type key",
-                            ));
-                        }
-                        Ok(ArgumentConstraint::NoConstraint)
-                    }
                     _ => Err(de::Error::custom(
-                        "invalid mode; expected allow-list, block-list, or no-constraint",
+                        "invalid mode; expected allow-list or block-list",
                     )),
                 }
             }
@@ -550,6 +533,33 @@ impl<'de> Deserialize<'de> for ArgumentConstraint {
 }
 
 impl WasmPolicy {
+    /// returns is_complain_mode 
+    pub(crate) fn log_complaint(&self, message: &str) -> bool {
+        if self.is_complain_mode_enabled() {
+            #[cfg(feature = "std")]
+            if let Ok(mut complaints) = self.complaints.lock() {
+                complaints.push(message.to_string());
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn is_complain_mode_enabled(&self) -> bool {
+        self.behaviour_overwrite.is_complain()
+    }
+
+    /// Prints all recorded complaints to stdout. Only relevant in complain mode.
+    pub fn print_complaints(&self) {
+        #[cfg(feature = "std")]
+        if let Ok(complaints) = self.complaints.lock() {
+            for complaint in complaints.iter() {
+                println!("{complaint}");
+            }
+        }
+    }
+
     #[cfg(feature = "std")]
     pub(crate) fn should_record_arguments(&self) -> bool {
         self.create_mode && self.create_args_mode != CreateArgsMode::None
@@ -585,6 +595,11 @@ impl WasmPolicy {
         }
 
         let max_values = max_values_limit(self.create_args_mode);
+        // if max_values == Some(0), we don't save any constraints
+        if max_values == Some(0) {
+            return;
+        }
+
         let key = CalledHostFunction {
             package: metadata.package.to_string(),
             interface: metadata.interface.to_string(),
@@ -595,37 +610,25 @@ impl WasmPolicy {
         let Ok(mut map) = self.called_arguments.lock() else {
             return;
         };
-        let entry = map.entry(key).or_default();
-        if entry.len() < arguments.len() {
-            entry.resize(arguments.len(), ArgumentConstraint::NoConstraint);
-        }
+        let entry = map.entry(key).or_insert_with(BTreeMap::new);
 
         for (i, arg) in arguments.iter().enumerate() {
             let Some(initial_values) = constraint_values_from_val(arg) else {
-                entry[i] = ArgumentConstraint::NoConstraint;
                 continue;
             };
 
-            match &mut entry[i] {
-                ArgumentConstraint::NoConstraint => {
-                    if max_values == Some(0) {
-                        continue;
-                    }
-                    entry[i] = ArgumentConstraint::AllowList(initial_values);
-                }
+            let constraint = entry.entry(i).or_insert_with(|| ArgumentConstraint::AllowList(initial_values.clone()));
+            match constraint {
                 ArgumentConstraint::AllowList(values) => {
-                    if !values.push_unique(arg) {
-                        entry[i] = ArgumentConstraint::NoConstraint;
-                        continue;
-                    }
+                    values.push_unique(arg);
                     if let Some(limit) = max_values {
                         if values.len() > limit {
-                            entry[i] = ArgumentConstraint::NoConstraint;
+                            *constraint = ArgumentConstraint::BlockList(ConstraintValues::Bool(Vec::new()));
                         }
                     }
                 }
                 ArgumentConstraint::BlockList(_) => {
-                    entry[i] = ArgumentConstraint::NoConstraint;
+                    // empty blocklist acts as a no-constraint marker which gets ignored when writing out the file
                 }
             }
         }
@@ -650,11 +653,15 @@ impl WasmPolicy {
                 .or_default();
             let mut function_policy = FunctionPolicy {
                 allow: true,
-                arguments: Vec::new(),
+                arguments: BTreeMap::new(),
             };
 
             if let Some(args) = called_arguments.get(called) {
-                function_policy.arguments = args.clone();
+                function_policy.arguments = args
+                    .iter()
+                    .filter(|(_, c)| matches!(c, ArgumentConstraint::AllowList(_)))
+                    .map(|(i, c)| (*i, c.clone()))
+                    .collect();
             }
 
             if let Some(resource) = &called.resource {
@@ -703,7 +710,7 @@ impl WasmPolicy {
         interface: &str,
         resource: Option<&str>,
         function_name: &str,
-    ) -> (bool, Vec<ArgumentConstraint>) {
+    ) -> (bool, BTreeMap<usize, ArgumentConstraint>) {
         let default_allowed = match self.default_mode {
             DefaultMode::Allow => true,
             DefaultMode::Deny => false,
@@ -711,14 +718,14 @@ impl WasmPolicy {
 
         // Look up the package policy
         let Some(pkg) = self.packages.get(package) else {
-            return (default_allowed, Vec::new());
+            return (default_allowed, BTreeMap::new());
         };
 
         let pkg_allowed = pkg.allow.unwrap_or(default_allowed);
 
         // Look up the interface policy
         let Some(iface) = pkg.interfaces.get(interface) else {
-            return (pkg_allowed, Vec::new());
+            return (pkg_allowed, BTreeMap::new());
         };
 
         let iface_allowed = iface.allow.unwrap_or(pkg_allowed);
@@ -728,14 +735,14 @@ impl WasmPolicy {
                 if let Some(func) = resource.functions.get(function_name) {
                     return (func.allow, func.arguments.clone());
                 }
-                return (resource.allow.unwrap_or(iface_allowed), Vec::new());
+                return (resource.allow.unwrap_or(iface_allowed), BTreeMap::new());
             }
         } else if let Some(func) = iface.functions.get(function_name) {
             // Check freestanding functions in the interface
             return (func.allow, func.arguments.clone());
         }
 
-        (iface_allowed, Vec::new())
+        (iface_allowed, BTreeMap::new())
     }
 
     /// call this when no policy file is provided to get a default policy that allows everything
