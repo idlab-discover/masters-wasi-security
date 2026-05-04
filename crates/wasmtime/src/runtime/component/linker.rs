@@ -490,7 +490,6 @@ impl<T: 'static> LinkerInstance<'_, T> {
                 package: package.to_string(),
                 arguments: arguments,
                 wasm_policy: self.wasm_policy.clone(),
-                types_checked: false.into(),
             }
         } else {
             panic!(

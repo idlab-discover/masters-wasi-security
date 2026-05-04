@@ -117,6 +117,9 @@ impl BehaviourOverwrite {
     fn is_none(&self) -> bool {
         matches!(self, BehaviourOverwrite::None)
     }
+    pub fn is_complain(&self) -> bool {
+        matches!(self, BehaviourOverwrite::Complain)
+    }
 }
 
 /// Policy for a specific package (e.g. `wasi:io`).

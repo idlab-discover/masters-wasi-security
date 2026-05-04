@@ -13,11 +13,11 @@ use crate::runtime::vm::{VMOpaqueContext, VMStore};
 use crate::{AsContextMut, CallHook, StoreContextMut, ValRaw};
 use alloc::sync::Arc;
 use core::any::Any;
+use core::fmt;
 use core::future::Future;
 use core::mem::{self, MaybeUninit};
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::AtomicBool;
 use wasmtime_environ::component::{
     CanonicalAbiInfo, ComponentTypes, InterfaceType, MAX_FLAT_ASYNC_PARAMS, MAX_FLAT_PARAMS,
     MAX_FLAT_RESULTS, OptionsIndex, TypeFuncIndex, TypeTuple,
@@ -29,7 +29,7 @@ pub struct HostFunc {
     func: Box<dyn Any + Send + Sync>,
 }
 
-// #[derive(Debug)]
+#[derive(Clone)]
 pub struct HostFuncMetadata {
     pub allowed_to_use: bool,
     pub name: String,
@@ -38,7 +38,6 @@ pub struct HostFuncMetadata {
     pub package: String,
     pub arguments: Vec<ArgumentConstraint>,
     pub wasm_policy: Arc<WasmPolicy>,
-    pub types_checked: AtomicBool,
 }
 
 impl std::fmt::Debug for HostFuncMetadata {
@@ -50,8 +49,18 @@ impl std::fmt::Debug for HostFuncMetadata {
             .field("interface", &self.interface)
             .field("package", &self.package)
             .field("arguments", &self.arguments)
-            .field("types_checked", &self.types_checked)
             .finish()
+    }
+}
+
+impl fmt::Display for HostFuncMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Host Function `{}/{}:{}{}`",
+            self.package,
+            self.interface,
+            self.resource.as_ref().map(|r| format!("{r}#")).unwrap_or_default(),
+            self.name,
+        )
     }
 }
 
@@ -81,9 +90,14 @@ impl HostFunc {
         T: 'static,
     {
         let entrypoint = Self::entrypoint::<T, F, P, R>;
+        let metadata2 = metadata.clone();
+        
         Arc::new(HostFunc {
             entrypoint,
-            typecheck: Box::new(typecheck::<P, R>),
+            typecheck: Box::new(move |ty_idx, instance_types| {
+                typecheck::<P, R>(ty_idx, instance_types)?;
+                validate_function_allowed_and_types_match(&metadata2, ty_idx, instance_types)
+            }),
             func: Box::new(HostFuncWithMetadata::<F> { func, metadata }),
         })
     }
@@ -145,7 +159,6 @@ impl HostFunc {
             call_host_and_handle_result::<T>(
                 cx,
                 &host_data.metadata,
-                TypeFuncIndex::from_u32(ty),
                 |store, instance| {
                     call_host(
                         store,
@@ -174,12 +187,14 @@ impl HostFunc {
             + 'static,
         T: 'static,
     {
+        let metadata2 = metadata.clone();
+        
         Arc::new(HostFunc {
             entrypoint: dynamic_entrypoint::<T, F>,
-            // This function performs dynamic type checks and subsequently does
-            // not need to perform up-front type checks. Instead everything is
-            // dynamically managed at runtime.
-            typecheck: Box::new(move |_expected_index, _expected_types| Ok(())),
+            // type check constraints against real types of arguments of the function
+            typecheck: Box::new(move |ty_idx, instance_types| {
+                validate_function_allowed_and_types_match(&metadata2, ty_idx, instance_types)
+            }),
             func: Box::new(HostFuncWithMetadata::<F> { func, metadata }),
         })
     }
@@ -249,6 +264,56 @@ where
     P::typecheck(&InterfaceType::Tuple(ty.params), types)
         .context("type mismatch with parameters")?;
     R::typecheck(&InterfaceType::Tuple(ty.results), types).context("type mismatch with results")?;
+    Ok(())
+}
+
+fn validate_function_allowed_and_types_match(
+    metadata: &HostFuncMetadata,
+    ty: TypeFuncIndex,
+    types: &InstanceType<'_>,
+) -> Result<()> {
+    // check if function allowed
+    if !metadata.allowed_to_use {
+        let msg = format!("{} is not allowed to be used", metadata);
+        if !metadata.wasm_policy.behaviour_overwrite.is_complain() {
+            bail!(msg);
+        }
+        #[cfg(feature = "std")]
+        if let Ok(mut complaints) = metadata.wasm_policy.complaints.lock() {
+            complaints.push(msg);
+        }
+    }
+
+    // check type of arguments against constraints
+    let ty = &types.types[ty];
+    let param_tys = &types.types[ty.params].types;
+    let offset = metadata.resource.as_ref().map_or(0, |_| 1);
+    for (i, constraint) in metadata.arguments.iter().enumerate() {
+        if let Some(f_arg_ty) = param_tys.get(i + offset) {
+            match constraint {
+                ArgumentConstraint::AllowList(v) | ArgumentConstraint::BlockList(v) => {
+                    if !v.matches_interface_type(*f_arg_ty) {
+                        bail!(
+                            "policy argument type mismatch for {} at argument {}: policy defined `{:?}` but function parameter is `{:?}`",
+                            metadata,
+                            i,
+                            v.interface_type(),
+                            f_arg_ty
+                        );
+                    }
+                }
+                ArgumentConstraint::NoConstraint => {}
+            }
+        } else {
+            bail!(
+                "policy issue: {} has {} argument constraint(s), but the Host function only has {} parameters",
+                metadata,
+                metadata.arguments.len(),
+                param_tys.len()
+            );
+        }
+    }
+    
     Ok(())
 }
 
@@ -765,16 +830,9 @@ fn check_arg_constraint(
             // if none -> argument not a primitive type
             if !constraint.check_val(val) {
                 let msg = format!(
-                    "Argument {} of `{}/{}:{}{}` violates policy constraint: value {:?} does not satisfy constraint {:?}",
+                    "Argument {} of {} violates policy constraint: value {:?} does not satisfy constraint {:?}",
                     idx - offset,
-                    metadata.package,
-                    metadata.interface,
-                    metadata
-                        .resource
-                        .as_ref()
-                        .map(|r| format!("{r}#"))
-                        .unwrap_or_default(),
-                    metadata.name,
+                    metadata,
                     val,
                     constraint
                 );
@@ -822,24 +880,17 @@ fn check_argument_constraints(metadata: &HostFuncMetadata, params: &[Val]) -> Re
     let offset = metadata.resource.as_ref().map_or(0, |_| 1);
     // let args_to_check = params.get(offset..).unwrap_or(&[]);
     // println!(
-    //     "Host args for `{}/{}:{}{}`: {:?}",
-    //     metadata.package,
-    //     metadata.interface,
-    //     metadata
-    //         .resource
-    //         .as_ref()
-    //         .map(|r| format!("{r}#"))
-    //         .unwrap_or_default(),
-    //     metadata.name,
+    //     "Host args for {} : {:?}",
+    //     metadata,
     //     args_to_check
     // );
 
-    // if metadata.wasm_policy.should_record_arguments() {
-    //     metadata
-    //         .wasm_policy
-    //         .record_function_arguments(metadata, &params[offset..]);
-    //     return Ok(());
-    // }
+    if metadata.wasm_policy.should_record_arguments() {
+        metadata
+            .wasm_policy
+            .record_function_arguments(metadata, &params[offset..]);
+        return Ok(());
+    }
 
     if metadata.arguments.is_empty() {
         return Ok(());
@@ -858,89 +909,19 @@ fn check_argument_constraints(metadata: &HostFuncMetadata, params: &[Val]) -> Re
 unsafe fn call_host_and_handle_result<T>(
     cx: NonNull<VMOpaqueContext>,
     metadata: &HostFuncMetadata,
-    ty: TypeFuncIndex,
     func: impl FnOnce(StoreContextMut<'_, T>, Instance) -> Result<()>,
 ) -> bool
 where
     T: 'static,
 {
     let cx = unsafe { VMComponentContext::from_opaque(cx) };
+    
+    #[cfg(feature = "std")]
+    metadata.wasm_policy.record_function_call(metadata);
+
     unsafe {
         ComponentInstance::enter_host_from_wasm(cx, |store, instance| {
-            // println!("Calling host function `{:?}`", metadata);
-            #[cfg(feature = "std")]
-            metadata.wasm_policy.record_function_call(metadata);
-            if !metadata.allowed_to_use {
-                let msg = format!(
-                    "Host function `{}/{}:{}{}` is not allowed to be used",
-                    metadata.package,
-                    metadata.interface,
-                    metadata
-                        .resource
-                        .as_ref()
-                        .map(|r| format!("{r}#"))
-                        .unwrap_or_default(),
-                    metadata.name
-                );
-                if metadata.wasm_policy.behaviour_overwrite
-                    == crate::component::wasm_policy::BehaviourOverwrite::Complain
-                {
-                    #[cfg(feature = "std")]
-                    if let Ok(mut complaints) = metadata.wasm_policy.complaints.lock() {
-                        complaints.push(msg);
-                    }
-                } else {
-                    bail!("{msg}");
-                }
-            }
             let mut store = store.unchecked_context_mut();
-
-            #[cfg(feature = "std")]
-            let types_already_checked = metadata
-                .types_checked
-                .load(core::sync::atomic::Ordering::Relaxed);
-            #[cfg(not(feature = "std"))]
-            let types_already_checked = false;
-
-            if !types_already_checked {
-                let types = instance.id().get(store.0).component().types().clone();
-                let ty = &types[ty];
-                let param_tys = &types[ty.params].types;
-                let offset = metadata.resource.as_ref().map_or(0, |_| 1);
-                let mut type_check_success = true;
-                for (i, constraint) in metadata.arguments.iter().enumerate() {
-                    if let Some(f_arg_ty) = param_tys.get(i + offset) {
-                        match constraint {
-                            ArgumentConstraint::AllowList(v) | ArgumentConstraint::BlockList(v) => {
-                                if !v.matches_interface_type(*f_arg_ty) {
-                                    println!(
-                                        "Type mismatch for argument {}: policy expects {:?} but function parameter is {:?}",
-                                        i,
-                                        v.interface_type(),
-                                        f_arg_ty
-                                    );
-                                    type_check_success = false;
-                                }
-                            }
-                            ArgumentConstraint::NoConstraint => {}
-                        };
-                    } else {
-                        println!(
-                            "Function has {} argument constraint(s), but function only has {} parameters",
-                            metadata.arguments.len(),
-                            param_tys.len()
-                        );
-                        type_check_success = false;
-                        break;
-                    }
-                }
-                #[cfg(feature = "std")]
-                if type_check_success {
-                    metadata
-                        .types_checked
-                        .store(true, core::sync::atomic::Ordering::Relaxed);
-                }
-            }
 
             store.0.call_hook(CallHook::CallingHost)?;
             let res = func(store.as_context_mut(), instance);
@@ -1220,7 +1201,6 @@ where
         call_host_and_handle_result(
             cx,
             &host_data.metadata,
-            TypeFuncIndex::from_u32(ty),
             |store, instance| {
                 call_host_dynamic::<T, _>(
                     store,
