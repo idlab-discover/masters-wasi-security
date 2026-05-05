@@ -389,19 +389,21 @@ where
             let mut lift = LiftContext::new(store.0.store_opaque_mut(), &options, instance);
             lift.enter_call();
 
-            let mut host_args = Vec::new();
-            unsafe {
-                dynamic_params_load(
-                    &mut lift,
-                    &types,
-                    storage,
-                    param_tuple,
-                    &mut host_args,
-                    MAX_FLAT_ASYNC_PARAMS,
-                    true,
-                )?
-            };
-            check_argument_constraints(metadata, &host_args)?;
+            if !metadata.arguments.is_empty() {
+                let mut host_args = Vec::new();
+                unsafe {
+                    dynamic_params_load(
+                        &mut lift,
+                        &types,
+                        storage,
+                        param_tuple,
+                        &mut host_args,
+                        MAX_FLAT_ASYNC_PARAMS,
+                        true,
+                    )?
+                };
+                check_argument_constraints(metadata, &host_args)?;
+            }
 
             let mut storage = unsafe { Storage::<'_, Params, u32>::new_async::<Return>(storage) };
 
@@ -477,19 +479,21 @@ where
         let mut lift = LiftContext::new(store.0.store_opaque_mut(), &options, instance);
         lift.enter_call();
 
-        let mut host_args = Vec::new();
-        unsafe {
-            dynamic_params_load(
-                &mut lift,
-                &types,
-                storage,
-                param_tuple,
-                &mut host_args,
-                MAX_FLAT_PARAMS,
-                true,
-            )?
-        };
-        check_argument_constraints(metadata, &host_args)?;
+        if !metadata.arguments.is_empty() {
+            let mut host_args = Vec::new();
+            unsafe {
+                dynamic_params_load(
+                    &mut lift,
+                    &types,
+                    storage,
+                    param_tuple,
+                    &mut host_args,
+                    MAX_FLAT_PARAMS,
+                    true,
+                )?
+            };
+            check_argument_constraints(metadata, &host_args)?;
+        }
 
         let mut storage = unsafe { Storage::<'_, Params, Return>::new_sync(storage) };
         let params = storage.lift_params(&mut lift, param_tys)?;
