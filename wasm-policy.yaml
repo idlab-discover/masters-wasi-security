@@ -27,13 +27,16 @@ packages:
                 # The "mode" field controls how the constraints are enforced
                 # (allow-list, block-list, or no-constraint).
                 arguments:
-                  - mode: block-list
+                  0:
+                    mode: block-list
                     bool: [true]        # arg 0: bool, block value 'true'
-                  - mode: allow-list
+                  1:
+                    mode: allow-list
                     s32: [10, 20, 30]   # arg 1: s32, only allow 10/20/30
-                  - mode: allow-list
+                  2:
+                    mode: allow-list
                     string: ["hello", "world"]  # arg 2: string, only allow these
-                  - mode: no-constraint # arg 3: no values checked → all allowed
+                  # arg 3 is missing, so it has no constraint and is fully allowed
                   # if there are more arguments in the function signature
                   # than in this list, all extra arguments are unconstrained
 
@@ -51,7 +54,7 @@ packages:
             #   blocking-write-and-flush:
             #     allow: false
             #   write:
-            #     allow: false # but this overwrites the higher level allow
+            #     allow: false # this overwrites the higher level allow
   wasi:cli:
     # allow: false # this overwrites the default allow for all functions in this package
     interfaces:
@@ -68,5 +71,7 @@ packages:
               set-keep-alive-enabled:
                 allow: true
                 arguments:
-                  - mode: block-list
+                  0:
+                    mode: block-list
                     bool: [false]   # arg 0: bool, block value 'false'
+                    # string: ["hello", "world"]  # arg 2: string, only allow these
