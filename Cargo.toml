@@ -86,6 +86,7 @@ tokio = { workspace = true, optional = true, features = [ "signal", "macros" ] }
 hyper = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
+toml.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["mm", "process"] }
@@ -239,7 +240,6 @@ wasmtime-wasi-config = { path = "crates/wasi-config", version = "38.0.3" }
 wasmtime-wasi-keyvalue = { path = "crates/wasi-keyvalue", version = "38.0.3" }
 wasmtime-wasi-threads = { path = "crates/wasi-threads", version = "38.0.3" }
 wasmtime-wasi-tls = { path = "crates/wasi-tls", version = "38.0.3" }
-wasmtime-wasi-tls-nativetls = { path = "crates/wasi-tls-nativetls", version = "38.0.3" }
 wasmtime-wast = { path = "crates/wast", version = "=38.0.3" }
 
 # Internal Wasmtime-specific crates.
@@ -296,15 +296,11 @@ cranelift = { path = "cranelift/umbrella", version = "0.125.3" }
 
 # Winch crates in this workspace.
 winch-codegen = { path = "winch/codegen", version = "=38.0.3" }
-
-# Internal crates not published to crates.io used in testing, builds, etc
-wasi-preview1-component-adapter = { path = "crates/wasi-preview1-component-adapter" }
 wasmtime-fuzzing = { path = "crates/fuzzing" }
 test-programs-artifacts = { path = 'crates/test-programs/artifacts' }
 wasmtime-test-util = { path = "crates/test-util" }
 byte-array-literals = { path = "crates/wasi-preview1-component-adapter/byte-array-literals" }
 pulley-interpreter-fuzz = { path = 'pulley/fuzz' }
-component-async-tests = { path = "crates/misc/component-async-tests" }
 
 # Bytecode Alliance maintained dependencies:
 # ---------------------------
@@ -317,7 +313,6 @@ cap-rand = { version = "3.4.4", features = ["small_rng"] }
 cap-fs-ext = "3.4.4"
 cap-net-ext = "3.4.4"
 cap-time-ext = "3.4.4"
-cap-tempfile = "3.4.4"
 fs-set-times = "0.20.1"
 system-interface = { version = "0.27.1", features = ["cap_std_impls"] }
 io-lifetimes = { version = "2.0.3", default-features = false }
@@ -367,14 +362,12 @@ similar = "2.1.0"
 toml = "0.8.10"
 mach2 = "0.4.2"
 memfd = "0.6.2"
-psm = "0.1.11"
 proptest = "1.0.0"
 rand = { version = "0.9.2", features = ["small_rng"] }
 # serde and serde_derive must have the same version
 serde = { version = "1.0.215", default-features = false, features = ['alloc'] }
 serde_derive = "1.0.188"
 serde_json = "1.0.80"
-glob = "0.3.0"
 libfuzzer-sys = "0.4.8"
 walkdir = "2.3.3"
 cfg-if = "1.0"
@@ -603,22 +596,6 @@ harness = false
 [[bench]]
 name = "wasi"
 harness = false
-
-[profile.release.package.wasi-preview1-component-adapter]
-opt-level = 's'
-strip = 'debuginfo'
-
-[profile.dev.package.wasi-preview1-component-adapter]
-# Make dev look like a release build since this adapter module won't work with
-# a debug build that uses data segments and such.
-incremental = false
-opt-level = 's'
-# Omit assertions, which include failure messages which require string
-# initializers.
-debug-assertions = false
-# Omit integer overflow checks, which include failure messages which require
-# string initializers.
-overflow-checks = false
 
 # Same as `wasi-preview1-component-adapter` above
 [profile.dev.package.wit-bindgen]
