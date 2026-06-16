@@ -10,12 +10,7 @@ use std::str::FromStr;
 use std::{fs::File, path::Path, time::Duration};
 use wasmtime::{Engine, Module, Precompiled, StoreLimits, StoreLimitsBuilder};
 use wasmtime_cli_flags::{CommonOptions, opt::WasmtimeOptionValue};
-use wasmtime_wasi::{
-    WasiCtxBuilder,
-    PolicyOptions,
-    NetworkRule,
-    NetworkRuleProtocol,
-};
+use wasmtime_wasi::{NetworkRule, NetworkRuleProtocol, PolicyOptions, WasiCtxBuilder};
 
 #[cfg(feature = "component-model")]
 use wasmtime::component::Component;
@@ -108,9 +103,9 @@ pub struct RunCommon {
     pub vars: Vec<(String, Option<String>)>,
 
     /// Pass a policy file to configure WASI policies.
-    /// 
+    ///
     /// Only relevant for WASI programs (component-model).
-    /// The policy file is a TOML file that specifies various WASI options 
+    /// The policy file is a TOML file that specifies various WASI options
     #[arg(long = "policy", value_name = "FILE", value_parser = parse_policy_file)]
     pub policy_file: Option<PolicyOptions>,
 }
@@ -133,7 +128,7 @@ fn parse_dirs(s: &str) -> Result<(String, String)> {
     Ok((host.into(), guest.into()))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct ParsePolicyFile {
     env: Option<HashMap<String, String>>,
     arguments: Option<Vec<String>>,
@@ -141,13 +136,13 @@ struct ParsePolicyFile {
     network: Option<ParsePolicyNetworkOptions>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct ParsePolicyStorageOptions {
     readonly: Option<Vec<String>>,
     mount: Option<Vec<String>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct ParsePolicyNetworkOptions {
     allow_ip_name_lookup: Option<bool>,
     bind: Option<Vec<String>>,
@@ -155,8 +150,8 @@ struct ParsePolicyNetworkOptions {
 }
 
 fn parse_policy_file(s: &str) -> Result<PolicyOptions> {
-    let file_contents = fs::read_to_string(s)
-        .with_context(|| format!("failed to read policy file: {}", s))?;
+    let file_contents =
+        fs::read_to_string(s).with_context(|| format!("failed to read policy file: {}", s))?;
     let parsed_options = toml::from_str::<ParsePolicyFile>(&file_contents)
         .with_context(|| format!("failed to parse policy file: {}", s))?;
 
@@ -172,12 +167,14 @@ fn parse_policy_file(s: &str) -> Result<PolicyOptions> {
 
     if let Some(storage) = parsed_options.storage {
         if let Some(readonly) = storage.readonly {
-            options.storage_readonly = readonly.into_iter()
+            options.storage_readonly = readonly
+                .into_iter()
                 .map(|ab| parse_dirs(&ab))
                 .collect::<Result<Vec<(String, String)>>>()?;
         }
         if let Some(mount) = storage.mount {
-            options.storage_mount = mount.into_iter()
+            options.storage_mount = mount
+                .into_iter()
                 .map(|ab| parse_dirs(&ab))
                 .collect::<Result<Vec<(String, String)>>>()?;
         }
@@ -186,19 +183,25 @@ fn parse_policy_file(s: &str) -> Result<PolicyOptions> {
     if let Some(network) = parsed_options.network {
         options.allow_ip_name_lookup = network.allow_ip_name_lookup.unwrap_or(false);
         for addr in network.bind.unwrap_or(vec![]) {
-            options.network_bind.push(parse_policy_network_address(addr)?);
+            options
+                .network_bind
+                .push(parse_policy_network_address(addr)?);
         }
         for addr in network.connect.unwrap_or(vec![]) {
-            options.network_connect.push(parse_policy_network_address(addr)?);
+            options
+                .network_connect
+                .push(parse_policy_network_address(addr)?);
         }
     }
     Ok(options)
 }
 
 fn parse_policy_network_address(addr: String) -> Result<NetworkRule> {
-    let (ip_str, parts) = addr.rsplit_once( ':')
+    let (ip_str, parts) = addr
+        .rsplit_once(':')
         .ok_or(anyhow!("Error parsing address: {}", addr))?;
-    let ip = Ipv4Addr::from_str(ip_str).map(IpAddr::V4)
+    let ip = Ipv4Addr::from_str(ip_str)
+        .map(IpAddr::V4)
         .or(Ipv6Addr::from_str(ip_str).map(IpAddr::V6))
         .with_context(|| format!("Failed to parse IP: {} from address {}", ip_str, addr))?;
     let (port_str, proto_str) = match parts.rsplit_once("/") {

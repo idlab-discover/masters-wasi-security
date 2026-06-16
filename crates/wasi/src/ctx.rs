@@ -47,13 +47,13 @@ pub struct WasiCtxBuilder {
 
 #[derive(Default, Debug, Clone)]
 pub struct PolicyOptions {
-    pub env : Option<HashMap<String, String>>,
-    pub arguments : Option<Vec<String>>,
-    pub storage_readonly : Vec<(String, String)>,
-    pub storage_mount : Vec<(String, String)>,
-    pub network_bind : Vec<NetworkRule>,
-    pub network_connect : Vec<NetworkRule>,
-    pub allow_ip_name_lookup : bool,
+    pub env: Option<HashMap<String, String>>,
+    pub arguments: Option<Vec<String>>,
+    pub storage_readonly: Vec<(String, String)>,
+    pub storage_mount: Vec<(String, String)>,
+    pub network_bind: Vec<NetworkRule>,
+    pub network_connect: Vec<NetworkRule>,
+    pub allow_ip_name_lookup: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -80,8 +80,6 @@ impl NetworkRule {
         self.socket.port() == 0 || self.socket.port() == addr.port()
     }
 }
-
-
 
 impl WasiCtxBuilder {
     /// Creates a builder for a new context with default parameters set.
@@ -110,7 +108,11 @@ impl WasiCtxBuilder {
         let mut builder = Self::new();
         // dbg!(&policy);
         if let Some(env) = policy.env {
-            builder.envs(&env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<(&str, &str)>>());
+            builder.envs(
+                &env.iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect::<Vec<(&str, &str)>>(),
+            );
         }
         if let Some(args) = policy.arguments {
             builder.args(&args);
@@ -122,17 +124,31 @@ impl WasiCtxBuilder {
             builder.preopened_dir(host_path, guest_path, DirPerms::all(), FilePerms::all())?;
         }
 
+        builder.allow_ip_name_lookup(policy.allow_ip_name_lookup);
+
         builder.socket_addr_check(move |addr, reason| {
             let allowed = match reason {
-                SocketAddrUse::TcpBind => policy.network_bind.iter().any(|r| r.matches(NetworkRuleProtocol::TCP, addr)),
-                SocketAddrUse::UdpBind => policy.network_bind.iter().any(|r| r.matches(NetworkRuleProtocol::UDP, addr)),
+                SocketAddrUse::TcpBind => policy
+                    .network_bind
+                    .iter()
+                    .any(|r| r.matches(NetworkRuleProtocol::TCP, addr)),
+                SocketAddrUse::UdpBind => policy
+                    .network_bind
+                    .iter()
+                    .any(|r| r.matches(NetworkRuleProtocol::UDP, addr)),
 
-                SocketAddrUse::TcpConnect => policy.network_connect.iter().any(|r| r.matches(NetworkRuleProtocol::TCP, addr)),
-                SocketAddrUse::UdpConnect | SocketAddrUse::UdpOutgoingDatagram => policy.network_connect.iter().any(|r| r.matches(NetworkRuleProtocol::UDP, addr)),
+                SocketAddrUse::TcpConnect => policy
+                    .network_connect
+                    .iter()
+                    .any(|r| r.matches(NetworkRuleProtocol::TCP, addr)),
+                SocketAddrUse::UdpConnect | SocketAddrUse::UdpOutgoingDatagram => policy
+                    .network_connect
+                    .iter()
+                    .any(|r| r.matches(NetworkRuleProtocol::UDP, addr)),
             };
             Box::pin(async move { allowed })
         });
-        //println!("Done setting up from policy"); 
+        //println!("Done setting up from policy");
         Ok(builder)
     }
 
@@ -265,10 +281,10 @@ impl WasiCtxBuilder {
     /// ]);
     /// ```
     pub fn envs(&mut self, env: &[(impl AsRef<str>, impl AsRef<str>)]) -> &mut Self {
-       // print!("WasiCtxBuilder::envs([");
-       // for (k, v) in env {
-       //     print!("({}, {}), ", k.as_ref(), v.as_ref());
-       // }
+        // print!("WasiCtxBuilder::envs([");
+        // for (k, v) in env {
+        //     print!("({}, {}), ", k.as_ref(), v.as_ref());
+        // }
         //println!("])");
         self.cli.environment.extend(
             env.iter()
