@@ -70,7 +70,7 @@ pub enum NetworkRuleProtocol {
 }
 
 impl NetworkRule {
-    fn matches(&self, protocol: NetworkRuleProtocol, addr: SocketAddr) -> bool {
+    pub fn matches(&self, protocol: NetworkRuleProtocol, addr: SocketAddr) -> bool {
         if self.protocol != NetworkRuleProtocol::BOTH && protocol != self.protocol {
             return false;
         }

@@ -87,6 +87,7 @@ hyper = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
 toml.workspace = true
+dlopen2 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["mm", "process"] }
@@ -407,6 +408,7 @@ termcolor = "1.4.1"
 flate2 = "1.0.30"
 tokio-util = "0.7.4"
 arbtest = "0.3.1"
+dlopen2 = "0.8"
 
 # =============================================================================
 #
