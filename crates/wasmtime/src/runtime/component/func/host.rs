@@ -134,15 +134,13 @@ fn val_to_json(val: &Val) -> serde_json::Value {
 }
 
 /// Query the OPA server with function metadata and optional arguments.
-fn query_opa(
-    metadata: &HostFuncMetadata,
-    args: Option<Vec<serde_json::Value>>,
-    opa_url: Option<&str>,
-) -> Result<()> {
+fn query_opa(metadata: &HostFuncMetadata, args: &[Val], opa_url: Option<&str>) -> Result<()> {
     if opa_url.is_none() {
         return Ok(());
     }
+    let args = (!args.is_empty()).then_some(args.iter().map(val_to_json).collect());
     let url = opa_url.unwrap();
+
     let request = OpaRequest {
         input: OpaRequestInput {
             name: &metadata.name,
@@ -436,17 +434,7 @@ where
                 )?
             };
             let skip = if metadata.resource.is_some() { 1 } else { 0 };
-            let opa_args: Vec<serde_json::Value> =
-                opa_vals[skip..].iter().map(val_to_json).collect();
-            query_opa(
-                metadata,
-                if opa_args.is_empty() {
-                    None
-                } else {
-                    Some(opa_args)
-                },
-                opa_url,
-            )?;
+            query_opa(metadata, &opa_vals[skip..], opa_url)?;
 
             // Now do the typed lift (same LiftContext, no second enter_call)
             let mut storage = unsafe { Storage::<'_, Params, u32>::new_async::<Return>(storage) };
@@ -536,16 +524,7 @@ where
             )?
         };
         let skip = if metadata.resource.is_some() { 1 } else { 0 };
-        let opa_args: Vec<serde_json::Value> = opa_vals[skip..].iter().map(val_to_json).collect();
-        query_opa(
-            metadata,
-            if opa_args.is_empty() {
-                None
-            } else {
-                Some(opa_args)
-            },
-            opa_url,
-        )?;
+        query_opa(metadata, &opa_vals[skip..], opa_url)?;
 
         // Now do the typed lift (same LiftContext, no second enter_call)
         let mut typed_storage = unsafe { Storage::<'_, Params, Return>::new_sync(storage) };
@@ -972,17 +951,9 @@ where
     // OPA policy check with the already-lifted args
     // For resource methods, skip the first arg (resource handle / self)
     let args_start = if metadata.resource.is_some() { 1 } else { 0 };
-    let opa_args: Vec<serde_json::Value> = params_and_results[args_start..result_start]
-        .iter()
-        .map(val_to_json)
-        .collect();
     query_opa(
         metadata,
-        if opa_args.is_empty() {
-            None
-        } else {
-            Some(opa_args)
-        },
+        &params_and_results[args_start..result_start],
         opa_url,
     )?;
 
