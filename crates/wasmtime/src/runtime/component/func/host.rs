@@ -131,12 +131,13 @@ fn val_to_json(val: &Val) -> serde_json::Value {
 /// Evaluate the OPA policy locally with the provided function metadata and optional arguments.
 fn evaluate_policy(
     metadata: &HostFuncMetadata,
-    args: Option<Vec<serde_json::Value>>,
+    args: &[Val],
     engine: Option<&alloc::sync::Arc<regorus::Engine>>,
 ) -> Result<()> {
     let Some(engine) = engine else {
         return Ok(());
     };
+    let args = (!args.is_empty()).then_some(args.iter().map(val_to_json).collect());
 
     let request = OpaRequest {
         input: OpaRequestInput {
@@ -430,17 +431,7 @@ where
                 )?
             };
             let skip = if metadata.resource.is_some() { 1 } else { 0 };
-            let opa_args: Vec<serde_json::Value> =
-                opa_vals[skip..].iter().map(val_to_json).collect();
-            evaluate_policy(
-                metadata,
-                if opa_args.is_empty() {
-                    None
-                } else {
-                    Some(opa_args)
-                },
-                wasm_policy_engine,
-            )?;
+            evaluate_policy(metadata, &opa_vals[skip..], wasm_policy_engine)?;
 
             // Now do the typed lift (same LiftContext, no second enter_call)
             let mut storage = unsafe { Storage::<'_, Params, u32>::new_async::<Return>(storage) };
@@ -530,16 +521,7 @@ where
             )?
         };
         let skip = if metadata.resource.is_some() { 1 } else { 0 };
-        let opa_args: Vec<serde_json::Value> = opa_vals[skip..].iter().map(val_to_json).collect();
-        evaluate_policy(
-            metadata,
-            if opa_args.is_empty() {
-                None
-            } else {
-                Some(opa_args)
-            },
-            wasm_policy_engine,
-        )?;
+        evaluate_policy(metadata, &opa_vals[skip..], wasm_policy_engine)?;
 
         // Now do the typed lift (same LiftContext, no second enter_call)
         let mut typed_storage = unsafe { Storage::<'_, Params, Return>::new_sync(storage) };
@@ -966,17 +948,9 @@ where
     // OPA policy check with the already-lifted args
     // For resource methods, skip the first arg (resource handle / self)
     let args_start = if metadata.resource.is_some() { 1 } else { 0 };
-    let opa_args: Vec<serde_json::Value> = params_and_results[args_start..result_start]
-        .iter()
-        .map(val_to_json)
-        .collect();
     evaluate_policy(
         metadata,
-        if opa_args.is_empty() {
-            None
-        } else {
-            Some(opa_args)
-        },
+        &params_and_results[args_start..result_start],
         wasm_policy_engine,
     )?;
 
