@@ -11,6 +11,7 @@ use std::{fs::File, path::Path, time::Duration};
 use wasmtime::{Engine, Module, Precompiled, StoreLimits, StoreLimitsBuilder};
 use wasmtime_cli_flags::{CommonOptions, opt::WasmtimeOptionValue};
 use wasmtime_wasi::{NetworkRule, NetworkRuleProtocol, PolicyOptions, WasiCtxBuilder};
+use dlopen2::wrapper::WrapperApi;
 
 #[cfg(feature = "component-model")]
 use wasmtime::component::Component;
@@ -108,6 +109,12 @@ pub struct RunCommon {
     /// The policy file is a TOML file that specifies various WASI options
     #[arg(long = "policy", value_name = "FILE", value_parser = parse_policy_file)]
     pub policy_file: Option<PolicyOptions>,
+
+    /// Optional path to a shared library (.so on Linux) that must implement the `WasiPolicyEngineApi`, i.e. the method `new_wasi_ctx_builder(policy)` that shall instantiate (and initialize) a `WasiCtxBuilder`structure with WASI capabilities in a custom way, based on  either the (optional) initial policy passed as `--policy` CLI argument, or some other external input or both. (The library is free to to either augment the initial policy or replace it with another dynamically.)
+    /// The shared library is dynamically loaded by Wasmtime. If not present, the native policy engine is used as usual, i.e. the --policy value is used as is.
+    /// Only relevant for WASI programs (component-model).
+    #[arg(long = "policy-engine", value_name = "SHARED_LIB_FILE")]
+    pub wasi_policy_engine: Option<String>
 }
 
 fn parse_env_var(s: &str) -> Result<(String, Option<String>)> {
@@ -221,6 +228,12 @@ fn parse_policy_network_address(addr: String) -> Result<NetworkRule> {
         protocol: protocol,
     })
 }
+
+#[derive(WrapperApi)]
+pub struct WasiPolicyEngineApi {
+    new_wasi_ctx_builder: fn(policy: Option<PolicyOptions>)-> Result<WasiCtxBuilder>
+}
+
 
 impl RunCommon {
     pub fn store_limits(&self) -> StoreLimits {

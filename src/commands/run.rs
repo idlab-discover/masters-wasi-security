@@ -5,9 +5,10 @@
     allow(irrefutable_let_patterns, unreachable_patterns)
 )]
 
-use crate::common::{Profile, RunCommon, RunTarget};
+use crate::common::{Profile, RunCommon, RunTarget, WasiPolicyEngineApi};
 use anyhow::{Context as _, Error, Result, anyhow, bail};
 use clap::Parser;
+use dlopen2::wrapper::Container;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -99,7 +100,6 @@ impl RunCommand {
         //         }
         //     }
         // }
-
 
         self.run.common.init_logging()?;
 
@@ -1092,10 +1092,25 @@ impl RunCommand {
     /// `wasmtime-wasi`-vs-`wasi-common` here more than anything else.
     fn set_wasi_ctx(&self, store: &mut Store<Host>) -> Result<()> {
         // println!("set_wasi_ctx() in run.rs called");
-        let mut builder = match &self.run.policy_file {
-            Some(policy) => wasmtime_wasi::WasiCtxBuilder::new_from_policy(policy.clone())?,
-            None => wasmtime_wasi::WasiCtxBuilder::new(),
+        let mut builder = match &self.run.wasi_policy_engine {
+            Some(policy_engine_lib_path) => {
+                let dyn_lib_container: Container<WasiPolicyEngineApi> =
+                    unsafe { Container::load(policy_engine_lib_path) }
+                        .map_err(|err| {
+                            format!(
+                                "Could not open library or load symbols from file '{}': {}",
+                                policy_engine_lib_path, err
+                            )
+                        })
+                        .unwrap();
+                dyn_lib_container.new_wasi_ctx_builder(self.run.policy_file.clone())?
+            }
+            None => match &self.run.policy_file {
+                Some(policy) => wasmtime_wasi::WasiCtxBuilder::new_from_policy(policy.clone())?,
+                None => wasmtime_wasi::WasiCtxBuilder::new(),
+            },
         };
+
         builder.inherit_stdio().args(&self.compute_argv()?);
         self.run.configure_wasip2(&mut builder)?;
         let ctx = builder.build_p1();
