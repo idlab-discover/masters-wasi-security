@@ -1,5 +1,4 @@
 //! Contains the common Wasmtime command line interface (CLI) flags.
-
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::Deserialize;
@@ -577,7 +576,7 @@ pub struct CommonOptions {
     /// This TOML configuration file can provide same configuration options as the
     /// `--optimize`, `--codgen`, `--debug`, `--wasm`, `--wasi` CLI options, with a couple exceptions.
     ///
-    /// Additional options specified on the command line will take precedent over options loaded from
+    /// Additional options specified on the command line or the policy file will take precedent over options loaded from
     /// this TOML file.
     #[arg(long = "config", value_name = "FILE")]
     #[serde(skip)]
@@ -638,6 +637,8 @@ impl CommonOptions {
             self.wasm = toml_options.wasm;
             self.wasi = toml_options.wasi;
         }
+
+        // CLI args have the highest priority.
         self.opts.configure_with(&self.opts_raw);
         self.codegen.configure_with(&self.codegen_raw);
         self.debug.configure_with(&self.debug_raw);

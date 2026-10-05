@@ -1,0 +1,52 @@
+# version: String
+# version of the policy file
+version = "0.0.1"
+
+# arguments: Option<Vec<String>> default: []
+# extra arguments to pass to 
+# arguments = ["-S", "help"]
+
+# specify network options
+[network]
+# bind: Option<Vec<String>> default: []
+# "ip:port/protocol" or "ip:port".
+# if no protocol is defined both udp and tcp are allowed.
+# use this in case you want to host a service on a port
+bind = [
+  "0.0.0.0:3000",
+  # "0.0.0.0:8080",
+  # "127.0.0.1:3000/udp",
+  # "10.0.0.2:443/tcp",
+]
+
+# connect: Option<Vec<String>> default: []
+# "ip:port/protocol" or "ip:port".
+# if no protocol is defined both udp and tcp are allowed.
+# dictates what ports the guest is allowed to connect to (e.g., only allow access to websites)
+connect = [
+  "127.0.0.1:3000",
+  # "0.0.0.0:3006/tcp",
+  # "192.168.1.22:80",
+]
+
+# allow_ip_name_lookup: Option<Bool> default: false
+# akin to: guest is allowed to use the getaddrinfo() in POSIX
+allow_ip_name_lookup = false
+
+
+[env]
+# env: Option<HashMap<String, String>>
+# env_var_name = value
+# foo = "bar"
+bar = "foo"
+
+# Formatted as "host_path::guest_path"
+[storage]
+readonly = [
+  # "/home/mvkenhov/Documents/git/elastic/::/"
+]
+
+# Allows both read and write
+mount = [
+  # "/home/mvkenhov/Documents/git/elastic/::/"
+]

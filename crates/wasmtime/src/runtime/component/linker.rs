@@ -873,6 +873,12 @@ impl<T: 'static> LinkerInstance<'_, T> {
     }
 
     fn insert(&mut self, name: &str, item: Definition) -> Result<usize> {
+        // TODO: if you want to block whole modules at linker level
+        // if let Definition::Instance(_) = item {
+        //     if name.starts_with("wasi:filesystem") {
+        //         return Err(anyhow::anyhow!("Illegal use of component"));
+        //     }
+        // }
         self.map
             .insert(name, self.strings, self.allow_shadowing, item)
     }
